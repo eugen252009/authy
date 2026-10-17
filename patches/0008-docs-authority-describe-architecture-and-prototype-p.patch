@@ -1,0 +1,4501 @@
+From dd6c9f14df1034e5e2d92459e34a75a132f0ddd6 Mon Sep 17 00:00:00 2001
+From: Eugen <eugen252009@gmail.com>
+Date: Sat, 17 Oct 2026 10:22:52 +0200
+Subject: [PATCH 8/9] docs: authority: describe architecture and prototype
+ provenance
+
+Document the Linux-based architecture, upstream provenance, historical prototype/design records and experimental boundaries. Preserve notices and source history; qualification-reference documents follow next.
+---
+ .../create-file-authority.rst                 |  136 +
+ .../dac-architecture-audit.rst                |  249 ++
+ .../historical-cve-review.rst                 |   81 +
+ Documentation/authority-prototype/index.rst   |   58 +
+ .../reconstruction-request.md                 | 3267 +++++++++++++++++
+ Documentation/authority/architecture.md       |  313 ++
+ Documentation/authority/design-history.md     |  287 ++
+ Documentation/authority/index.rst             |   23 +
+ Documentation/index.rst                       |    1 +
+ 9 files changed, 4415 insertions(+)
+ create mode 100644 Documentation/authority-prototype/create-file-authority.rst
+ create mode 100644 Documentation/authority-prototype/dac-architecture-audit.rst
+ create mode 100644 Documentation/authority-prototype/historical-cve-review.rst
+ create mode 100644 Documentation/authority-prototype/index.rst
+ create mode 100644 Documentation/authority-prototype/reconstruction-request.md
+ create mode 100644 Documentation/authority/architecture.md
+ create mode 100644 Documentation/authority/design-history.md
+ create mode 100644 Documentation/authority/index.rst
+
+diff --git a/Documentation/authority-prototype/create-file-authority.rst b/Documentation/authority-prototype/create-file-authority.rst
+new file mode 100644
+index 0000000000000000000000000000000000000000..37bfbd87025c83d7bb4adab41eb19cfe03724fa1
+--- /dev/null
++++ b/Documentation/authority-prototype/create-file-authority.rst
+@@ -0,0 +1,136 @@
++CREATE and initial file-data authority
++=======================================
++
++Status and conclusion
++--------------------
++
++This note records the qualification of how ``CREATE_FILE`` relates to initial
++READ/WRITE authority for newly created file descriptions on Linux
++7.3.0-rc5. The selected rule is **CREATE authorizes instantiation only**. In a
++confined authority domain, initial data access requires separate, pre-existing
++READ and/or WRITE scope. CREATE neither implies those scopes nor synthesizes
++rights into the resulting file description.
++
++The source change is in ``fs/namei.c``. It extends the prototype already in
++this worktree; it adds no authority right or UAPI. The implementation and test
++results described here were retained in the conversation summary after the
++original ``/tmp`` report and logs were lost. Exact artifacts should therefore
++be treated as historical records, not independently re-verified by this file.
++
++Rule
++----
++
++* A missing-name ``open(O_CREAT)`` needs CREATE authority on the containing
++directory. If the open requests READ and/or WRITE, each requested access also
++needs the corresponding independently scoped right.
++* If the pathname already names an object, ``O_CREAT`` is not an instantiation
++operation and CREATE is not required. Normal READ/WRITE authority still
++applies. ``O_CREAT|O_EXCL`` on an existing entry remains ``EEXIST``.
++* ``O_TRUNC`` is a separate WRITE operation. Truncating an existing inode
++requires WRITE even for ``O_RDONLY|O_TRUNC``. The resulting descriptor remains
++read-only when its access mode is ``O_RDONLY``. For the missing-name route,
++operation access is checked before creation; ``dentry_create()`` includes
++WRITE when deriving access for ``O_TRUNC``.
++* ``O_TMPFILE`` requires CREATE on its parent and separate data scope matching
++the valid requested access mode. Linux rejects ``O_TMPFILE|O_RDONLY`` as an
++invalid combination. A successful write-only tmpfile gets WRITE; a successful
++read/write tmpfile gets READ and WRITE.
++* A successfully opened descriptor is a bearer capability. Removing path
++scopes later does not revoke its access. This rule does not revoke existing
++file descriptions or mappings.
++
++Source reasoning
++----------------
++
++``fs/namei.c:may_o_create()`` is the pre-instantiation path for ordinary
++missing-name ``O_CREAT`` and the atomic-open route. It already carries the
++open operation's access mode. The prototype now checks the prospective child
++path for independent READ/WRITE scope in confined domains, after checking
++parent CREATE and before ``security_inode_create()`` / filesystem
++instantiation.
++
++The important VFS behavior is the ``FMODE_CREATED`` branch in ``do_open()``:
++Linux intentionally sets ``acc_mode = 0`` and clears ``O_TRUNC`` for an inode
++just created by this open. Generic DAC is not re-run on that new inode. The
++``struct file`` access mode was initialized from the open flags, and the
++prototype's initial FD-capability rights derive from that file mode. A CREATE
++check by itself would therefore permit the new descriptor to carry READ or
++WRITE access without a matching data scope. The added check is pre-create,
++not a post-create test that leaves a live, overly powerful descriptor behind.
++
++``vfs_tmpfile()`` is a distinct path and does not use ``may_o_create()``. It
++now checks CREATE on the parent and validates the child-path initial data
++access before calling the filesystem ``->tmpfile`` operation. Both atomic and
++non-atomic ``dentry_create()`` paths also pass requested access; WRITE is
++included for ``O_TRUNC``.
++
++These checks are gated on ``authority_is_confined()``. In the unconfined case
++the new initial-right checks are inert. Existing VFS, mount-write, idmapping,
++filesystem-operation, device-cgroup, and LSM checks continue to run; this
++change does not claim to override them. Filesystem-specific callbacks are not
++substituted by the generic semantic-scope fallback.
++
++Qualification recorded
++----------------------
++
++The retained final QEMU matrix reported zero failures for the creation suite
++and the existing confinement suite. It covered:
++
++* Four READ/WRITE scope masks crossed with named ``O_CREAT`` using
++  ``O_RDONLY``, ``O_WRONLY``, and ``O_RDWR``; missing-name ``O_CREAT|O_TRUNC``;
++  denied creation left no artifact.
++* Existing-file ``O_CREAT`` without CREATE scope, ``O_EXCL``/``EEXIST``, and
++  existing-file ``O_TRUNC`` for write-only and read-only-plus-truncate access.
++* ``open()``, ``openat()``, ``openat2(RESOLVE_IN_ROOT)``, and ``creat()``.
++* ``O_TMPFILE`` write-only/read-write combinations, invalid read-only flags,
++  and a parent outside the CREATE scope.
++* Initial FD-capability bits against ``F_GETFL``; read/write use,
++  ``ftruncate``, ``fallocate``, and mmap behavior; ``F_SETFL`` access-mode
++  immutability; dup/fork/exec and cross-process ``SCM_RIGHTS``; descriptor use
++  after path-scope removal; and restriction of a created RDWR descriptor to
++  READ.
++* Positive scoped creation on rootfs, ramfs, and tmpfs despite parent DAC
++  denial; root ``CAP_DAC_OVERRIDE`` not exceeding handled WRITE; unconfined
++  create compatibility; and ``EROFS`` for named and temporary-file creation
++  on read-only tmpfs.
++
++Retained result counters were:
++
++* ``CREATE_MINTING_FAILURES=0``
++* ``CONFINEMENT_TEST_FAILURES=0``
++* Existing FD-capability, delete, and rename regression counters were each
++  zero against the final recorded kernel image.
++
++The old log and test source are no longer present following the reboot. The
++conversation retained the final image SHA-256 as
++``c0694f3a9a7d70cff6676fb2adafe725e3a7872a67c0b6fe80e3870c7b56d569`` and the
++config SHA-256 as
++``5ab2b496a41786dd90a780c5a063aa93e785351484158d29d28b422f9decd3ea``. The
++recorded build used Debian Trixie tooling, GCC 14.2.0, and GNU ld 2.44. These
++hashes identify artifacts from the prior run; they cannot verify that those
++artifacts still exist.
++
++Known boundary and unqualified areas
++------------------------------------
++
++The guest successfully published an ``O_TMPFILE`` through
++``linkat(..., AT_EMPTY_PATH)`` into a different directory outside the CREATE
++scope. Fresh write-open there was denied by the handled WRITE scope, while the
++original tmpfile descriptor retained its bearer write authority. This was a
++separate namespace mediation gap at the time of this CREATE qualification.
++
++**Follow-up:** the later LINK phase added `FS_LINK` (right ID 7) and exact
++destination-parent enforcement for the audited `link()`/`linkat()` VFS path,
++including `AT_EMPTY_PATH`, when LINK is selected as handled. The historical
++observation remains valid for that older run and for current domains that do
++not mark LINK handled. See the canonical :download:`architecture <../authority/architecture.md>`,
++:download:`design history <../authority/design-history.md>`, and
++:download:`qualification ledger <../authority/qualification-status.md>` for the
++selected source/destination model and current runtime limits.
++
++The original matrix did not qualify ACL entries, idmapped mounts, NFS/FUSE/
++overlayfs or other callback filesystems, race stress, enforcing-LSM policy, or
++every kernel-internal ``dentry_create()`` caller. The ``dentry_create()``
++``O_TRUNC`` access calculation was source-reviewed, not directly runtime
++tested. These results support the bounded initial-creation rule; they do not
++establish complete mediation or a standalone sandbox.
+diff --git a/Documentation/authority-prototype/dac-architecture-audit.rst b/Documentation/authority-prototype/dac-architecture-audit.rst
+new file mode 100644
+index 0000000000000000000000000000000000000000..aece5028995080c5749fc5e98e9279a78d651075
+--- /dev/null
++++ b/Documentation/authority-prototype/dac-architecture-audit.rst
+@@ -0,0 +1,249 @@
++Classic DAC compatibility-provider architecture audit
++======================================================
++
++Recovery note
++-------------
++
++The original read-only audit was stored at ``/tmp/authority-dac-audit/report.md``
++and was lost after reboot. This reconstruction uses the retained summary and
++re-checks selected source locations in the current worktree. It preserves the
++original conclusion and scope, but is not a byte-for-byte recovery of the lost
++report. No DAC adapter is implemented by this document or audit.
++
++Conclusion
++----------
++
++A generic Unix DAC compatibility provider is **partially feasible**. Generic
++mode bits, POSIX ACL decisions, idmapped ownership translation, and DAC
++capability overrides can be factored conceptually. A provider cannot safely
++replace the full VFS permission path: it must receive operation and path
++context, preserve ``mnt_idmap`` semantics, and leave filesystem-specific
++``->permission`` callbacks and independent restrictions as fail-closed layers.
++
++The recommended first step was a no-behavior-change boundary for regular-file
++READ/WRITE on generic-permission filesystems. A bounded implementation and
++focused runtime experiment have since been completed; see the follow-up below.
++This does not justify replacing permission decisions or bypassing callbacks.
++
++Current generic DAC and independent checks
++------------------------------------------
++
++In ``fs/namei.c``, ``acl_permission_check()`` implements generic Unix mode and
++POSIX ACL selection, including owner, group, and other cases. It translates
++inode ownership through the mount idmap. ``generic_permission()`` applies this
++mode/ACL result, then accounts for DAC override capabilities such as
++``CAP_DAC_READ_SEARCH`` and ``CAP_DAC_OVERRIDE``. The prototype's legacy
++``AUTH_FS_DAC_OVERRIDE`` right is also visible in this generic layer.
++
++``inode_permission_path()`` is the context-aware wrapper in the current tree.
++Its relevant ordering is:
++
++#. In a confined domain, reject a handled semantic operation/access lacking
++   the exact required scoped right.
++#. Apply superblock and inode restrictions, including read-only filesystem
++   ``-EROFS``, immutable-write checks, and unmapped-ID restrictions.
++#. Call the filesystem's ``i_op->permission`` when present; otherwise use
++   ``generic_permission()``.
++#. Only a generic ``-EACCES`` may be satisfied by the operation-aware semantic
++   fallback. A filesystem-specific permission callback is not bypassed.
++#. Apply device-cgroup and LSM inode-permission checks.
++
++This ordering is a key constraint for any provider: semantic authorization
++must not skip mount/superblock, immutable, idmap, filesystem callback,
++devcgroup, or LSM decisions. The callback's error is not equivalent to
++ordinary generic DAC denial.
++
++Operation context and mediation points
++--------------------------------------
++
++A DAC decision is not just a function of inode mode and credentials. Relevant
++context includes the operation (open/read/write/create/search/truncate), the
++pathname or exact parent, mount identity and idmap, open flags, and whether the
++object is new or already exists.
++
++The current tree has operation-aware paths including:
++
++* Path traversal through ``may_lookup()`` and the path-aware permission
++  helpers.
++* Regular-file opens through ``may_open()`` and
++  ``inode_permission_path()`` with access context.
++* Missing-name regular-file creation through ``may_o_create()`` and parent
++  CREATE context.
++* ``O_TMPFILE`` through ``vfs_tmpfile()``, which has separate parent-create
++  behavior.
++* Existing-file ``O_TRUNC`` as an open-time WRITE operation and later
++  truncate checks.
++* Namespace mutation through the prototype's separate create/delete/rename
++  decisions and existing VFS checks.
++
++The sites are not interchangeable. ``FMODE_CREATED`` suppresses the normal
++access-mode DAC check on a just-created inode, so creation must separately
++validate the initial file-description access before instantiation. ``O_TMPFILE``
++does not travel through ``may_o_create()``. Existing-file ``O_CREAT`` must not
++be mistaken for creation. Rename requires its own parent context. These cases
++are why a provider API lacking operation/path context would be unsafe.
++
++A future provider boundary should preserve the VFS caller's existing
++``mnt_idmap`` and distinguish generic DAC denial from errors returned by
++filesystem callbacks. It must not treat all ``-EACCES`` results as
++interchangeable if that would bypass callback, LSM, or mount restrictions.
++
++ACLs, idmapping, and filesystem callbacks
++-----------------------------------------
++
++POSIX ACL evaluation is intertwined with generic permission checking and
++idmapped owner/group interpretation. A provider must preserve ACL precedence
++and the mount's idmap; using raw inode uid/gid or a separate userspace
++approximation would change semantics. The original audit had no retained ACL
++runtime coverage. A later focused provider experiment exercised POSIX ACL
++compatibility and the mandatory ceiling on a test fixture, but idmapped mounts
++and broader ACL/filesystem combinations remain unqualified.
++
++Filesystems may supply ``i_op->permission`` and may have their own open,
++create, or tmpfile behavior. Those callbacks are independent policy and
++filesystem semantics, not generic DAC. The original audit treated them as
++separate fail-closed layers. The prototype's generic path-aware authorization
++does not constitute qualification of NFS, FUSE, overlayfs, or other callback
++filesystems.
++
++DAC capabilities are also operation-sensitive. Read/search override and
++read/write override have different Unix semantics, and inode ownership
++mapping matters. They should not be flattened into an unscoped global allow.
++The prototype's historical/global override behavior was separately recognized
++as a compatibility/security concern; confined handled rights must not be
++exceeded by root's DAC override.
++
++FDs, mappings, and positive grant sources
++-----------------------------------------
++
++An open file description is a bearer capability. Descriptor duplication,
++inheritance, and ``SCM_RIGHTS`` share or transfer an already-open description;
++removing pathname authority does not revoke it. Shared writable mappings may
++outlive changes to namespace/path authority as well. A DAC provider at open
++time cannot retroactively revoke descriptors or mappings.
++
++Positive authorization may come from explicit semantic scope grants, while
++ordinary Unix DAC remains an independent baseline/compatibility mechanism.
++The authorization interface must identify which source granted access and
++must not silently broaden scope through descendants, bind aliases, or an
++ambiguous path identity. Exact-path / mount+dentry identity constraints are
++part of this prototype's model; they are not identical to Unix DAC's
++inode-centric rules.
++
++Known gaps and audit boundaries
++-------------------------------
++
++The retained audit identified the following high-priority caveats:
++
++* Handled semantic rights cover only wired operation classes. Unhandled
++  operations remain ordinary VFS/DAC behavior and are outside a complete
++  confinement claim.
++* Create and later data access are distinct. The ``FMODE_CREATED`` bypass and
++  separate ``O_TMPFILE`` path require explicit qualification of initial FD
++  rights; those were addressed in the follow-up documented in
++  :doc:`create-file-authority`.
++* ``may_o_create()`` has CREATE context, while lower create helpers can use
++  context-free permission checks. Semantic CREATE over DAC denial is therefore
++  not uniformly established across all create paths.
++* The historical tmpfile ``linkat(AT_EMPTY_PATH)`` publication gap is now
++  addressed by the separate handled ``FS_LINK`` right on the exact destination
++  parent for audited ``filename_linkat()`` paths. This is bounded coverage, not
++  complete namespace mediation; callback/context-free link callers and
++  unhandled LINK domains remain outside that claim. See the canonical
++  :download:`qualification status <../authority/qualification-status.md>`.
++* Existing/inherited/imported writable FDs and shared mappings are not
++  revoked. Procfs reopening, hard-link/name import, and imported descriptors
++  require separate treatment.
++* ACL-specific behavior, idmapped mounts, callback filesystems, LSM enforcing
++  behavior, leases/delegations, mount topology corner cases, and race stress
++  were not comprehensively qualified.
++
++These are limitations, not findings that every listed path is exploitable.
++The initial architecture audit was read-only. Later bounded implementation work
++added the narrow fanotify event-FD ceiling described below; it added no rights
++or UAPI and did not broaden the DAC provider.
++
++Feasibility and completed narrow experiment
++-------------------------------------------
++
++**Assessment: partially feasible; generic-permission regular-file opens and
++path-based ``truncate()`` are boundedly qualified.** In ``fs/namei.c``,
++existing regular-file open READ/WRITE requests carry subject credentials,
++object/path, mount idmap, and semantic operation bits. The legacy provider
++calls the existing ``do_inode_permission()`` / ``generic_permission()``
++implementation and classifies ALLOW, DENY, or NOT_APPLICABLE; it does not
++duplicate mode, ACL, ownership, or Linux DAC-capability logic. Generic DAC
++remains the default compatibility source. On generic ``-EACCES``, an explicit
++semantic grant can satisfy the operation; a confined handled right still
++requires its explicit scope. O_RDWR composes READ and WRITE separately when
++the aggregate DAC check denies. Path ``truncate()`` now submits a fresh WRITE
++request through the same bounded path, including when WRITE is unhandled.
++
++The custom ``i_op->permission`` callback path and independent restrictions are
++not bypassed. Overlayfs is an example: its callback checks overlay DAC and
++lower-layer permission under mounter credentials, so the provider does not
++replace callback failures. Managed mmap is a separate FD-capability decision,
++not a DAC-provider extension; tests verify shared-write denial after FD
++attenuation and prevention of a later ``mprotect()`` upgrade. ``rw_verify_area()``
++checks managed FD READ/WRITE rights after the LSM file-permission hook and is
++used by ordinary and io_uring I/O plus representative sendfile/splice/copy
++paths. ``F_SETFL`` only changes mutable status flags, not ``f_mode`` or
++``O_ACCMODE``; a runtime attempt did not restore an attenuated READ right.
++``ftruncate()`` and existing-FD I/O remain established-capability operations.
++
++The clean external build and exact isolated QEMU/KVM image reported 47 focused
++integration cases with zero failures, including explicit path-truncate grants
++and denials, ftruncate distinction, path/proc reopen, renamed-scope paths,
++mmap/mprotect, and FD-capability-gated ``sendfile``, ``splice``, and
++``copy_file_range``, including an ``F_SETFL`` non-escalation case. Reconstructed
++regression subsets reported CREATE 3,
++LINK 4, DELETE 2, RENAME 2, focused confinement 34, and FD capability 6, each
++with zero failures. These are bounded subsets, not restoration or rerun of the
++complete historical suites. Exact hashes, logs, and harness are temporary in
++``/tmp/authority-dac-integration/``.
++
++Source review found an exceptional XFS ``open_by_handle`` fresh-description
++path that bypasses ``may_open()``. The exported ceiling helper denies missing
++handled READ/WRITE scope there; the ioctl still requires ``CAP_SYS_ADMIN`` and
++does not use the generic DAC provider. The follow-up isolated QEMU run tested
++both XFS-specific and generic ``open_by_handle_at()`` READ/WRITE grants and
++missing-scope denials on a compatible XFS v5 fixture. Ordinary namei open
++variants and io_uring openat/openat2 converge on the normal open path; PIDFD
++and namespace export opens are special-object paths.
++
++A separate capability-establishment follow-up distinguished aliases/imports
++from fresh descriptions. ``pidfd_getfd()`` imports the target's existing
++``struct file`` after ptrace-style authorization; runtime testing confirmed
++that unrestricted source rights survive receiver path denial while READ-only
++and zero-right source attenuation also survives. ``/proc/<pid>/fd/N`` reopen
++is instead a fresh open and was denied by the receiver's handled scope after
++the ptrace precondition passed. io_uring OPENAT followed namei authorization;
++fixed-file registration and update preserved a later FD-rights reduction.
++``O_PATH`` provided object/path reachability but not READ access; a fresh
++procfs reopen was denied.
++
++Runtime falsification exposed one additional fresh-description path:
++fanotify event-FD creation used ``dentry_open_nonotify()`` without the handled
++regular-file READ/WRITE ceiling. The ordinary open control failed with
++``EACCES`` while the fanotify listener could read the event FD. A narrow
++ceiling check is now applied in ``create_fd()`` before that open; the postpatch
++``FAN_REPORT_FD_ERROR`` test reported ``-EACCES``. This adds no DAC-provider
++route and retains the existing file-open LSM/filesystem checks.
++
++Anonymous storage was kept separate from persistent pathname files.
++``memfd_create()`` returns an unlinked tmpfs-backed regular inode and
++``F_GETFD_CAP`` reported READ|WRITE; a confined guest with handled READ|WRITE
++and no scopes successfully wrote and shared-mapped it. SysV shared-memory
++write likewise succeeded. These are explicit out-of-path-model boundaries,
++not resolved by this generic-DAC experiment. No new rights or UAPI were added.
++
++**Narrow verdict:** the regular-file generic-DAC provider is supported only
++for ordinary generic-permission opens plus path-based ``truncate()``. It is
++not a universal fresh-open or authorization core. Do not extend it based on
++these runs. Callback filesystems, idmapped mounts, enforcing LSM, races,
++broader filesystems, immutable/append-only cases, and the complete historical
++prototype regression suites remain unqualified. The exact follow-up image,
++config, QEMU logs, and capability harness are temporary under
++``/tmp/authority-capability-establishment/``; see
++``Documentation/authority/qualification-status.md`` and
++``/tmp/authority-capability-establishment/report.md``.
+diff --git a/Documentation/authority-prototype/historical-cve-review.rst b/Documentation/authority-prototype/historical-cve-review.rst
+new file mode 100644
+index 0000000000000000000000000000000000000000..b0bb59fa446a5b7e893db76004030a036987612a
+--- /dev/null
++++ b/Documentation/authority-prototype/historical-cve-review.rst
+@@ -0,0 +1,81 @@
++Historical vulnerability review: recovery record
++==================================================
++
++Recovery limitation
++-------------------
++
++The original report and downloaded source material under
++``/tmp/authority-cve-eval/`` were lost after reboot. The surviving design
++history supplies an approximate CVE list and classifications, but not the
++advisories, upstream commit IDs, evidence provenance, or per-CVE reachability
++analysis. This document does not fabricate those missing citations and is not
++a substitute for the original evidence-backed report. See
++``Documentation/authority/design-history.md`` and
++``Documentation/authority/qualification-status.md`` for the retained
++approximate labels, explicitly marked unverified.
++
++Scope and method retained
++-------------------------
++
++The prior evaluation compared historical vulnerability records, vendor
++advisories, and upstream fixes against the prototype's source-level mediation
++and its bounded runtime behavior. The report distinguished:
++
++* what a vulnerability's affected operation/path was;
++* whether that operation was covered by a prototype hook;
++* whether a missing hook represented likely reachability, or only a
++  source-level coverage gap; and
++* what runtime experiments established on the fixed, patched test kernel.
++
++No vulnerable kernel was booted and no historical exploit was run. Runtime
++tests used synthetic fixtures in isolated QEMU/KVM guests. The purpose was
++coverage analysis, not exploit reproduction.
++
++Retained findings
++-----------------
++
++The prior report concluded that prototype coverage was incomplete and that a
++source-level gap must not automatically be described as a reachable CVE. The
++prototype covers only a bounded set of semantic filesystem operations; it is
++not a complete mediation layer. Existing file descriptions and mappings are
++not revoked, some namespace/import operations are not wired, and
++filesystem-specific behavior and LSM policy were not fully qualified.
++
++The historical assessment explicitly separated the prototype's coverage from
++the vulnerability's actual reachability and from exploit reproduction. It did
++not claim that synthetic tests reproduced any historical vulnerability.
++
++The more detailed qualification subsequently retained in the project notes
++found additional concrete boundaries: CREATE must not mint initial READ/WRITE
++FD access (see :doc:`create-file-authority`), and tmpfile publication through
++``linkat(AT_EMPTY_PATH)`` into a different directory was possible even though
++fresh writes there remained blocked by the handled WRITE scope. Those findings
++are not retroactively assigned to any particular CVE here because the original
++CVE-to-operation mapping is unavailable. A subsequent LINK phase added a
++handled exact-destination-parent right for the audited hard-link paths; this
++does not change what the older runtime reported. See the canonical
++:download:`qualification status <../authority/qualification-status.md>` for
++the current bounded result and remaining gaps.
++
++What is missing / how to restore the original review
++----------------------------------------------------
++
++The following evidence did not survive and must be reacquired before citing
++this as a source-backed CVE-by-CVE analysis:
++
++* affected version ranges and exact source/advisory references for each retained CVE ID;
++* links or copies of NVD/CVE records, vendor advisories, and upstream fixes;
++* the original per-CVE prototype-coverage and reachability conclusions;
++* the exact source references and evidence provenance; and
++* the original runtime fixtures and logs.
++
++To restore the full report, repeat the source/advisory research from trusted
++public records, record retrieval dates and stable URLs/commit IDs, map each
++vulnerability's preconditions to the current source, and label source-level
++coverage separately from runtime evidence. Do not run historical exploits or
++boot a known-vulnerable kernel. The bounded synthetic QEMU policy remains in
++force.
++
++This recovery note is intentionally incomplete. It preserves the safety
++constraints and aggregate conclusions without presenting unverifiable
++per-CVE claims as fact.
+diff --git a/Documentation/authority-prototype/index.rst b/Documentation/authority-prototype/index.rst
+new file mode 100644
+index 0000000000000000000000000000000000000000..4912e53e0bd3f05cff370d13c7eb3260ada12c5c
+--- /dev/null
++++ b/Documentation/authority-prototype/index.rst
+@@ -0,0 +1,58 @@
++Linux authority and FD-capability prototype
++============================================
++
++This directory contains reconstructed engineering notes for the experimental
++Linux authority / file-descriptor capability prototype in this worktree. They
++are not upstream kernel documentation, a security certification, or a claim of
++complete mediation.
++
++.. warning::
++
++   The original reports were stored under ``/tmp`` and were lost after a
++   reboot. These files were recreated from the surviving conversation summary
++   and the current worktree. The CREATE report is reconstructed in detail from
++   the retained test/build summary. The DAC report is a synthesis of retained
++   audit findings plus current source review. The historical CVE report keeps
++   approximate IDs/classifications supplied in the surviving design history,
++   but the original advisory/upstream evidence and reachability table are
++   unavailable.
++
++Canonical architecture record
++------------------------------
++
++The durable design history is maintained separately from the older
++qualification reports:
++
++* :download:`Architecture and invariants <../authority/architecture.md>`
++* :download:`Design history <../authority/design-history.md>`
++* :download:`Qualification status <../authority/qualification-status.md>`
++
++Reports
++-------
++
++* :doc:`create-file-authority` — CREATE versus initial READ/WRITE rights for
++  named ``O_CREAT`` and ``O_TMPFILE``; bounded implementation and QEMU results.
++* :doc:`dac-architecture-audit` — feasibility and boundaries of a future
++  generic Unix DAC compatibility provider.
++* :doc:`historical-cve-review` — scope and approximate classifications from
++  the historical-CVE evaluation, with a caveat about missing source evidence.
++
++Prototype state
++---------------
++
++The prototype remains experimental and uncommitted. The recorded baseline is
++``e767a4ea70a3992c37ed604157d32f0dfbf9b1e3`` on branch ``master``. The worktree
++contains pre-existing modifications across VFS, authority, FD-capability, and
++credential code; these documents do not replace or summarize every individual
++patch. Do not reset, clean, or otherwise discard that worktree based on these
++notes.
++
++Qualification constraints retained from the work:
++
++* Runtime experiments ran in isolated QEMU/KVM guests with synthetic fixtures.
++* No patched kernel was deployed to the host, no boot configuration was
++  changed, and the host was not rebooted into it.
++* No DAC adapter was implemented; no UAPI expansion for the DAC audit was
++  undertaken.
++* Existing/inherited/imported file descriptions and mappings are not revoked
++  by dropping path scopes. The prototype is not a standalone sandbox.
+diff --git a/Documentation/authority-prototype/reconstruction-request.md b/Documentation/authority-prototype/reconstruction-request.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..fbd7e0b70431f58ddfa8ce71bf1203f3e3dc49bb
+--- /dev/null
++++ b/Documentation/authority-prototype/reconstruction-request.md
+@@ -0,0 +1,3267 @@
++You are continuing work on an experimental Linux filesystem authority/capability prototype.
++
++The conversation context has undergone multiple compactions and must **not** be treated as a reliable source of the complete design history.
++
++Your task is therefore documentation-focused:
++
++> Reconstruct and write a durable, self-contained architecture/design-history document for the project that records not only the current implementation, but also the major assumptions, invariants, alternatives, experiments, failures, design forks, rejected approaches, qualification results, known boundaries, and the reasoning that led to the current model.
++
++This documentation is intended specifically to survive future LLM context loss.
++
++A future engineer or LLM should be able to read the documentation and understand:
++
++```text
++what problem this prototype is trying to solve
++
++what the core conceptual model is
++
++which invariants are intentional
++
++how the model evolved
++
++which approaches failed
++
++why they failed
++
++which semantics were deliberately chosen
++
++which semantics remain undecided
++
++what has actually been runtime-qualified
++
++what has only been source-reviewed
++
++what remains out of model
++
++what should be investigated next
++```
++
++Do **not** turn this into marketing material.
++
++Negative results and abandoned directions are first-class architectural information.
++
++---
++
++# Safety / repository constraints
++
++Before doing anything, record:
++
++```bash
++git rev-parse HEAD
++git branch --show-current
++git status --short --branch
++git diff --stat
++git diff --check
++git remote -v
++```
++
++The worktree intentionally contains substantial existing uncommitted prototype changes.
++
++Preserve them.
++
++Do not:
++
++```text
++reset
++clean
++stash
++rebase
++discard changes
++modify implementation code
++change tests
++commit
++push
++fetch
++add a remote
++restore a remote
++deploy the kernel
++modify /boot
++modify the bootloader
++reboot the host
++```
++
++This task may modify **documentation files only**.
++
++Do not use `ccc index` as a prerequisite; a previous attempt timed out without completing.
++
++Use normal source inspection.
++
++---
++
++# Evidence sources
++
++First inspect the current tree and existing documentation.
++
++Also inspect the following historical reports if they still exist:
++
++```text
++/tmp/authority-cve-eval/report.md
++/tmp/authority-dac-audit/report.md
++/tmp/authority-create-minting/report.md
++```
++
++and any closely related authority/FD/delete/rename reports or logs under `/tmp`.
++
++If a report is absent, do not fail the task.
++
++The historical design record supplied below is authoritative context for the evolution of the prototype, but statements about the **current source tree** must still be verified against the current implementation where practical.
++
++Distinguish carefully between:
++
++```text
++CURRENT IMPLEMENTATION
++HISTORICAL IMPLEMENTATION
++RUNTIME-QUALIFIED FINDING
++SOURCE-REVIEWED FINDING
++DESIGN INTENT
++REJECTED DESIGN
++UNQUALIFIED AREA
++OPEN QUESTION
++```
++
++Do not silently blur these categories.
++
++---
++
++# Desired documentation layout
++
++Prefer a small durable documentation set rather than one enormous undifferentiated note.
++
++If there is already an obvious project-specific documentation location, integrate there.
++
++Otherwise create something equivalent to:
++
++```text
++Documentation/authority/architecture.md
++Documentation/authority/design-history.md
++Documentation/authority/qualification-status.md
++```
++
++The exact filenames may follow existing repository conventions.
++
++Suggested responsibility:
++
++```text
++architecture.md
++    stable conceptual model
++    terminology
++    invariants
++    authority relationships
++    current intended semantics
++
++design-history.md
++    chronological evolution
++    failed assumptions
++    alternatives
++    experiments
++    why decisions changed
++
++qualification-status.md
++    what is runtime-qualified
++    what is source-reviewed
++    what remains unqualified
++    known bypasses/model gaps
++    next investigations
++```
++
++Avoid unnecessary duplication between them.
++
++Cross-reference sections where appropriate.
++
++---
++
++# Core problem statement
++
++The project began from a dissatisfaction with the traditional coupling between Unix identity and ambient process authority.
++
++Traditional Unix often behaves conceptually like:
++
++```text
++process identity
++    UID/GID/groups
++        ↓
++filesystem ownership/mode/ACL
++        ↓
++broad ambient authority
++```
++
++The prototype investigates a stronger distinction:
++
++\[
++Identity \neq Authority
++\]
++
++The intended long-term model is that:
++
++```text
++UID/GID:
++    identity
++    ownership
++    accountability
++    compatibility
++    accounting
++    quota
++    legacy policy context
++
++explicit authority:
++    what this particular process may actually do
++```
++
++A key motivating example is:
++
++```text
++file owner = alice
++process UID = alice
++```
++
++which should not necessarily imply:
++
++```text
++this process may use every right Alice could traditionally recover
++over every Alice-owned object
++```
++
++A process may deliberately reduce itself to:
++
++```text
++READ project-A
++WRITE project-A
++```
++
++while:
++
++```text
++project-B
++~/.ssh
++~/Documents
++```
++
++remain inaccessible even though the process still runs as Alice and the objects remain owned by Alice.
++
++The important property is:
++
++> A principal can voluntarily give up operational authority without transferring ownership to another identity.
++
++Ownership therefore does not need to be changed merely to sandbox a process.
++
++---
++
++# Fundamental monotonic-authority principle
++
++The deepest architectural invariant is:
++
++\[
++A_{future} \subseteq A_{current}
++\]
++
++for authority reduction within a lineage.
++
++A process may:
++
++```text
++retain authority
++reduce authority
++derive weaker authority
++delegate authority it already possesses
++```
++
++but it may not locally reconstruct authority that was removed.
++
++A useful conceptual distinction is:
++
++```text
++disabled privilege
++```
++
++versus:
++
++```text
++privilege no longer belongs to this principal
++```
++
++The project intentionally targets the latter.
++
++Once WRITE has been removed from a capability/domain, the weaker holder should not retain a hidden WRITE ceiling that it can later reactivate.
++
++If stronger authority is needed, it must come from another principal that still possesses it.
++
++Conceptually:
++
++```text
++broker
++    strong authority
++        ↓ delegation
++
++agent
++    smaller authority
++        ↓ delegation
++
++helper
++    still smaller authority
++```
++
++with:
++
++\[
++A_{helper}
++\subseteq
++A_{agent}
++\subseteq
++A_{broker}
++\]
++
++If the helper needs something stronger, it must ask upward.
++
++It cannot manufacture it locally.
++
++---
++
++# Broker / escalation model
++
++This is an intentional feature, not an inconvenience.
++
++A lower-authority process may request an operation from a stronger broker.
++
++The broker may:
++
++```text
++deny
++
++perform the operation itself
++
++derive and send an exact weaker FD capability
++
++spawn another helper with appropriate authority
++
++ask the user/policy engine for approval
++```
++
++The requesting process itself does not become globally stronger.
++
++This is particularly important for AI-agent use cases.
++
++The desired compromise model is closer to:
++
++```text
++delegated task authority compromised
++```
++
++rather than:
++
++```text
++entire user's ambient authority compromised
++```
++
++---
++
++# Original identity-separation proof
++
++The early prototype introduced broad authority modes roughly equivalent to:
++
++```text
++AUTH_NORMAL
++AUTH_SYSTEM
++```
++
++and an authority control interface.
++
++The first important proof was that a task could retain:
++
++```text
++UID/GID/FSUID/FSGID = ordinary user
++Linux CapPrm/CapEff = zero
++```
++
++while a separate authority mechanism permitted selected operations that traditional DAC would deny.
++
++Objects created through that authority still retained normal Unix ownership such as UID 1000.
++
++This established the initial proposition:
++
++```text
++identity can remain conventional
++while operational authority comes from another mechanism
++```
++
++Historical broad `AUTH_SYSTEM` semantics remain compatibility/regression scaffolding, not the desired fine-grained final model.
++
++---
++
++# Extensible authority representation
++
++The early design deliberately rejected a fixed semantic `uint64_t` mask.
++
++The authority object evolved into an immutable/refcounted object associated with credentials, with rights represented using extensible dynamically sized bitmaps.
++
++Historical semantic identifiers include:
++
++```text
++AUTH_FS_DAC_OVERRIDE = 0
++AUTH_FS_CREATE_FILE  = 1
++AUTH_FS_TRAVERSE     = 2
++AUTH_FS_READ_FILE    = 3
++AUTH_FS_WRITE_FILE   = 4
++AUTH_FS_DELETE_FILE  = 5
++AUTH_FS_RENAME       = 6
++
++AUTH_FS_TEST_RIGHT_80
++    non-authorizing qualification right above bit 64
++```
++
++`TEST_RIGHT_80` was intentionally used to prove that the implementation was genuinely extensible rather than accidentally relying on a 64-bit internal assumption.
++
++Unknown non-zero requested rights fail closed.
++
++Future zero-filled extension space is accepted according to the versioned/extensible UAPI design.
++
++Document the current source representation rather than assuming these historical details remain textually identical.
++
++---
++
++# Immutable authority objects and reduction
++
++Credential copies share immutable authority state by refcount where appropriate.
++
++Reduction creates/replaces authority state rather than mutating shared authority upward.
++
++The security property is:
++
++```text
++new authority must be a subset of old authority
++```
++
++Unprivileged widening is forbidden.
++
++Document the exact current mechanics.
++
++---
++
++# Object-backed scopes
++
++An early critical design decision was to reject pathname-string prefixes as the security object.
++
++The prototype instead uses pinned kernel object/path identity, historically based on concepts such as:
++
++```text
++struct path
++mount
++dentry
++```
++
++The important semantics established by tests include:
++
++```text
++rename follows the original object
++
++replacement at the old pathname does not inherit authority
++
++symlink spelling is not the authority identity
++
++bind-mount aliases do not automatically become authorized
++under the mount-specific model
++```
++
++This is deliberate.
++
++Do not describe the model as simple pathname-prefix sandboxing.
++
++---
++
++# Why string-prefix scopes were rejected
++
++Record this explicit rejected path.
++
++A policy such as:
++
++```text
++allow /workspace/*
++```
++
++implemented as string-prefix matching is unsafe and semantically unstable because of:
++
++```text
++rename
++symlink
++..
++mount aliases
++replacement
++bind mounts
++```
++
++The prototype intentionally moved toward object-backed scope identity.
++
++---
++
++# CREATE_FILE history
++
++A semantic `CREATE_FILE` right was introduced rather than treating create as generic directory WRITE/DAC override.
++
++The goal was to distinguish:
++
++```text
++object creation
++```
++
++from:
++
++```text
++data mutation
++namespace removal
++rename
++```
++
++Historical tests established that CREATE alone did not imply:
++
++```text
++read existing file
++write existing file
++mkdir
++delete
++rename
++```
++
++However, an important historical ambiguity existed:
++
++Traditional Linux creation semantics could return an initial O_WRONLY/O_RDWR descriptor for a newly created object even when no independent semantic WRITE/READ check occurred.
++
++At first this was treated as potentially legitimate:
++
++```text
++CREATE may establish the initial handle
++```
++
++Later architecture work rejected that interpretation for confined domains.
++
++This evolution must be documented in detail.
++
++---
++
++# CREATE authority-minting failure and final rule
++
++A later DAC/authority audit found that freshly created files could skip the normal existing-file access-mode permission path and that later I/O trusted the established file description.
++
++This created a fundamental question:
++
++> Can CREATE_FILE mint data authority that the caller did not already possess?
++
++Two models were evaluated.
++
++## Model A — CREATE includes initial handle authority
++
++Under this model:
++
++```text
++CREATE + O_RDONLY -> new READ FD
++CREATE + O_WRONLY -> new WRITE FD
++CREATE + O_RDWR   -> new READ+WRITE FD
++```
++
++even without separate READ_FILE/WRITE_FILE authority.
++
++This is close to traditional Unix behavior.
++
++## Model B — CREATE does not mint data authority
++
++Under this model:
++
++```text
++CREATE
++```
++
++authorizes creation only.
++
++Requested initial descriptor access remains independently subject to:
++
++```text
++READ_FILE
++WRITE_FILE
++```
++
++The prototype ultimately chose **Model B for confined domains**.
++
++Current intended invariant:
++
++\[
++CREATE \not\Rightarrow READ
++\]
++
++and:
++
++\[
++CREATE \not\Rightarrow WRITE
++\]
++
++Named file creation and `O_TMPFILE` in a confined domain therefore require:
++
++```text
++CREATE authority
+++
++READ authority if initial mode requests read
+++
++WRITE authority if initial mode requests write
++```
++
++`O_TRUNC` is separately treated as a WRITE operation.
++
++Unconfined traditional Linux open behavior remains unchanged.
++
++This is a critical architectural decision.
++
++Explain why:
++
++> A new kernel capability must not accidentally contain semantic authority that the operation was not authorized to establish.
++
++---
++
++# Capability-minting invariant
++
++Record the broader principle discovered through CREATE:
++
++> Kernel operations that create new capability-bearing objects must have an explicit rule defining which authority may be minted into the resulting capability.
++
++Conceptually:
++
++\[
++Rights(newCapability)
++\subseteq
++AuthorizedOutput(caller, operation)
++\]
++
++A mechanical field such as:
++
++```text
++f_mode
++```
++
++must not be treated as proof that the caller was semantically authorized to establish those rights.
++
++Capability establishment should be authorized at creation time rather than relying on repeated future pathname checks.
++
++---
++
++# O_TMPFILE significance
++
++`O_TMPFILE` exposed an important semantic separation because it decouples:
++
++```text
++object instantiation
++```
++
++from:
++
++```text
++namespace publication
++```
++
++Creation-time READ/WRITE authority has now been addressed.
++
++However, a current known boundary remains:
++
++```text
++linkat(..., AT_EMPTY_PATH)
++```
++
++can publish an `O_TMPFILE` into a parent outside its CREATE scope.
++
++Fresh writes through the published name remain denied when WRITE authority is absent, so data authority is still bounded.
++
++But namespace insertion itself is currently unmediated.
++
++This is a known model gap.
++
++Do not describe confinement as complete while this exists.
++
++---
++
++# Emerging LINK / PUBLISH semantic operation
++
++The `O_TMPFILE` publication result revealed another important distinction:
++
++\[
++CREATE \neq LINK
++\]
++
++or more precisely:
++
++```text
++create a new filesystem object
++```
++
++is different from:
++
++```text
++attach an existing object to a namespace under a new name
++```
++
++This also applies to ordinary hard-link creation.
++
++The project has not yet qualified a LINK/PUBLISH semantic right.
++
++This is likely the next namespace-authority area to investigate before a general DAC-provider refactor.
++
++Important open questions include:
++
++```text
++What authority is required over the destination parent?
++
++What authority is required over the source object?
++
++Is possession of an established FD sufficient source authority?
++
++How should ordinary hard links compare with O_TMPFILE publication?
++
++Should the operation use an exact-parent namespace scope?
++
++How should link-count and filesystem-specific restrictions interact?
++```
++
++Do not invent final answers in the documentation.
++
++Record these as open questions.
++
++---
++
++# TRAVERSE / reachability
++
++Transparent ambient traversal authority was deliberately rejected.
++
++The reason is that ancestor lookup happens before the final target object is known.
++
++Allowing broad semantic traversal during ordinary absolute/pathname resolution risks accidentally exposing unrelated sibling namespace reachability.
++
++The resulting model introduced `FS_TRAVERSE`, but deliberately constrained its use to bounded, handle-first lookup such as:
++
++```text
++openat2 + RESOLVE_BENEATH
++openat2 + RESOLVE_IN_ROOT
++```
++
++Historical tests established combinations such as:
++
++```text
++TRAVERSE + CREATE
++```
++
++while each alone was insufficient for the bounded operation.
++
++Escape attempts using:
++
++```text
++..
++deep ..
++symlink escapes
++wrong parent FD
++bind aliases
++```
++
++were denied according to the qualified model.
++
++This means the current prototype primarily offers:
++
++```text
++operation confinement
++```
++
++not necessarily:
++
++```text
++complete pathname visibility confinement
++```
++
++Do not conflate these.
++
++---
++
++# READ_FILE
++
++`READ_FILE` was introduced as explicit data-observation authority for existing regular files.
++
++Historical qualification included:
++
++```text
++bounded BENEATH / IN_ROOT opens
++
++mode-000 file readable via explicit READ authority
++
++TRAVERSE-only insufficient
++
++READ-only does not imply WRITE
++
++wrong scope denied
++
++O_RDWR denied without WRITE
++
++truncate/append/create/list/mkdir/unlink/rename/exec
++not implied by READ
++```
++
++A major architectural result was:
++
++> Once a valid readable FD has been established, subsequent reads use the established FD capability and do not require re-opening pathname authority.
++
++This distinction becomes central later.
++
++---
++
++# WRITE_FILE
++
++`WRITE_FILE` was introduced independently from READ.
++
++Historical existing-file access matrix:
++
++```text
++O_RDONLY -> READ
++
++O_WRONLY -> WRITE
++
++O_RDWR   -> READ + WRITE
++
++O_TRUNC  -> additionally requires WRITE
++```
++
++An important historical edge was `O_RDONLY | O_TRUNC`, which still performs truncation even though the returned descriptor is read-only, therefore requiring both semantic requirements appropriate to the operation.
++
++Qualification covered:
++
++```text
++read-only authority
++write-only authority
++combined authority
++append
++truncate
++bounded BENEATH / IN_ROOT
++authority reduction after FD establishment
++```
++
++The established writable FD remains usable after pathname authority is dropped.
++
++That is intentional.
++
++---
++
++# Established FD principle
++
++A major design conclusion is:
++
++> Path authority establishes capabilities; already-established file descriptions are capabilities in their own right.
++
++Therefore:
++
++```text
++path authority
++```
++
++and:
++
++```text
++FD authority
++```
++
++must not be treated as identical.
++
++A process may lose the ability to open a new writable descriptor while an intentionally retained existing writable descriptor remains usable.
++
++This is not automatically an escape.
++
++It is retained capability authority.
++
++---
++
++# FD local-mutation audit
++
++Before implementing the explicit FD capability layer, the source was audited to understand what a `struct file` already authorizes.
++
++Important findings included:
++
++```text
++read/write/pread/pwrite:
++    largely use established file mode + later LSM hooks
++
++ftruncate:
++    regular-file established-write semantics plus further checks
++
++fallocate:
++    established-write semantics plus security hooks
++
++fsync:
++    not equivalent to fresh DAC authorization
++
++fchmod/fchown/xattr:
++    not simple data-FD rights
++    involve separate ownership/capability/security semantics
++
++F_SETFL:
++    cannot change O_ACCMODE
++
++/proc/self/fd reopen:
++    is a fresh open, not an aliasing of existing f_mode permissions
++
++O_PATH:
++    allows some metadata operations but not normal file data I/O
++```
++
++The conclusion was:
++
++```text
++struct file already behaves like a bearer capability for some data/size operations
++```
++
++but:
++
++```text
++FD possession != full object authority
++```
++
++Metadata and namespace mutations remain separate.
++
++---
++
++# Explicit FD-capability layer
++
++The project then added explicit FD introspection/attenuation/derivation APIs, historically:
++
++```text
++F_GETFD_CAP
++F_RESTRICTFD_CAP
++F_CLONEFD_CAP
++```
++
++The core rule is:
++
++\[
++newRights = oldRights \cap requestedRights
++\]
++
++No enable/re-enable operation exists.
++
++Once a right is removed from that capability, it cannot be reconstructed from that capability itself.
++
++---
++
++# dup versus clone semantics
++
++This distinction is central and should be documented explicitly.
++
++```text
++dup()
++```
++
++means:
++
++> another descriptor referring to the same underlying open file description/capability.
++
++Attenuation is therefore shared.
++
++By contrast:
++
++```text
++F_CLONEFD_CAP
++```
++
++derives a new independent file description/capability whose rights are bounded by the source.
++
++Conceptually:
++
++```text
++dup:
++    same capability, another reference
++
++clone:
++    independent derived capability
++```
++
++The clone can be weaker without reducing the source.
++
++Its file offset begins from the source state but subsequently diverges independently.
++
++---
++
++# SCM_RIGHTS semantics
++
++`SCM_RIGHTS` preserves the capability being transferred.
++
++Sending the original FD:
++
++```text
++shares the original established capability
++```
++
++Sending an attenuated clone:
++
++```text
++delegates the weaker independent capability
++```
++
++This is not an authority violation.
++
++Explicit imported FDs are themselves authority delegated by another principal.
++
++The mandatory process domain does not retroactively rewrite intentionally imported capabilities.
++
++This is important to the broker model.
++
++---
++
++# FD-capability qualification
++
++Historical qualification included:
++
++```text
++GET rights from O_RDONLY/O_WRONLY/O_RDWR
++
++RDWR -> READ
++RDWR -> WRITE
++RDWR -> zero
++
++superset restriction cannot restore removed rights
++
++dup family shares attenuation
++
++F_CLONEFD_CAP is independently attenuable
++
++chained derivation cannot escalate
++
++SCM_RIGHTS behavior
++
++fork/exec behavior
++
++read/pread
++write/pwrite
++ftruncate
++fallocate
++partial mmap behavior
++
++zero-right descriptors
++
++unknown rights fail closed
++
++future zero-filled ABI extension accepted
++```
++
++The supported clone target set was intentionally narrow rather than pretending every Linux file object could be safely cloned.
++
++Historically qualified regular storage included simple filesystems such as:
++
++```text
++rootfs
++ramfs
++tmpfs
++```
++
++Anonymous/non-regular objects were generally rejected unless explicitly qualified.
++
++---
++
++# Generic ioctl was intentionally deferred
++
++The prototype deliberately did **not** classify arbitrary ioctl operations as READ or WRITE.
++
++Generic ioctl commands can perform semantics that do not map safely to a universal data-access classification.
++
++For managed FDs, unsupported ioctl semantics were therefore intentionally fail-closed rather than guessed.
++
++This is an example of a deliberate model gap.
++
++---
++
++# mmap remains nuanced
++
++Historical partial qualification established distinctions such as:
++
++```text
++read mappings
++
++private writable mappings
++
++shared writable mappings
++
++existing mappings surviving later attenuation
++
++new mappings after attenuation
++```
++
++Do not claim complete mmap semantic coverage.
++
++A historical security lesson from Dirty COW/Dirty Pipe analysis is that kernel bugs can violate assumptions beneath normal file-write checks.
++
++---
++
++# DELETE_FILE
++
++Namespace deletion was deliberately separated from file data authority.
++
++The central result:
++
++\[
++WRITE\_FILE \neq DELETE\_FILE
++\]
++
++Unlink mutates the parent namespace, not the victim's data capability.
++
++Therefore DELETE authority is associated with the exact parent namespace object.
++
++Historical design rejected simply reusing generic ancestor scope.
++
++Qualified semantics included:
++
++```text
++exact parent required
++
++ancestor scope alone insufficient
++
++wrong parent denied
++
++victim READ/WRITE not implied
++
++CREATE not implied
++
++RENAME not implied
++
++directory removal not covered by DELETE_FILE
++
++symlink unlink removes the link entry, not target
++
++hard-link removal affects only that name
++
++existing FDs survive unlink
++```
++
++Object deletion and object capability revocation are separate concepts:
++
++\[
++namespace\ removal \neq established\ capability\ revocation
++\]
++
++---
++
++# Why ordinary unrestricted unlink was initially not used for positive grants
++
++The prototype initially provided a bounded direct-child namespace API because traditional `unlinkat()` does not itself provide openat2-style path-resolution bounds.
++
++The direct-child model used:
++
++```text
++already-open parent FD
++single component name
++no /
++no .
++no ..
++```
++
++This avoided ambient pathname traversal in the positive-authority path.
++
++Later mandatory confinement may deny ordinary DAC-authorized unlink at operation-specific hooks, but this does not erase the distinction between:
++
++```text
++bounded positive capability interface
++```
++
++and:
++
++```text
++ordinary pathname operation under a mandatory ceiling
++```
++
++Document both roles.
++
++---
++
++# DELETE independent restrictions
++
++Semantic DELETE authority intentionally does not bypass independent restrictions such as:
++
++```text
++EROFS
++immutable
++append-only
++sticky-bit semantics
++mountpoint rules
++LSM
++delegation/lease behavior
++filesystem unlink implementation
++```
++
++The semantic authority mechanism should replace only the permission decision it is explicitly designed to replace.
++
++It is not intended to become a super-capability.
++
++---
++
++# RENAME
++
++RENAME established another fundamental property:
++
++> Some operations require authority over multiple independent objects simultaneously.
++
++For:
++
++```text
++A/foo -> B/bar
++```
++
++the chosen model requires RENAME authority on each relevant exact parent.
++
++Conceptually:
++
++\[
++AllowRename(A,B)
++=
++RenameAuthority(A)
++\land
++RenameAuthority(B)
++\]
++
++Historical tests established:
++
++```text
++source only -> deny
++
++destination only -> deny
++
++both -> allow
++```
++
++when ordinary DAC would otherwise be insufficient or when mandatory semantics required both.
++
++---
++
++# Why DELETE + CREATE does not compose into RENAME
++
++This was a deliberate design decision.
++
++Atomic rename has semantics that cannot safely be approximated as:
++
++```text
++DELETE(source)
+++
++CREATE(destination)
++```
++
++Therefore:
++
++```text
++DELETE_FILE + CREATE_FILE
++```
++
++does not automatically authorize RENAME.
++
++Similarly, RENAME does not imply standalone DELETE or CREATE.
++
++This preserves semantic operation identity.
++
++---
++
++# Rename replacement semantics
++
++Replacing an existing destination during rename is still treated as part of atomic RENAME authority, not as an implicit standalone DELETE grant.
++
++Existing descriptors to the old destination continue to refer to that replaced object.
++
++After replacement:
++
++```text
++new pathname -> moved source object
++old destination FD -> old replaced object
++```
++
++This reinforced the distinction between:
++
++```text
++namespace identity
++```
++
++and:
++
++```text
++established object capability
++```
++
++---
++
++# Mandatory confinement: why additive authority failed
++
++The first semantic-authority implementation was additive.
++
++Conceptually:
++
++\[
++Allow = DAC \lor ExplicitAuthority
++\]
++
++This worked as a positive-grant mechanism, but it was **not a sandbox**.
++
++A synthetic security evaluation demonstrated that a UID 1000 process with narrow semantic scopes could still access its own unrelated files using ordinary DAC.
++
++Example:
++
++```text
++semantic authority:
++    workspace only
++
++UID 1000-owned outside file:
++    ordinary open(O_WRONLY) succeeded
++```
++
++Therefore:
++
++> Missing semantic authority did not mean denial.
++
++It only meant the semantic layer was not contributing an additional grant.
++
++This was a major failed assumption.
++
++---
++
++# Historical CVE/security evaluation
++
++A dedicated evaluation intentionally tested whether the additive prototype meaningfully prevented selected historical security failures.
++
++It did not.
++
++This negative result is important.
++
++Historical classifications included approximately:
++
++```text
++CVE-2021-41773 Apache traversal
++    UNAFFECTED as shipped
++    bounded authority-aware reconstruction rejected traversal,
++    but unmodified Apache was not forced through that interface
++
++CVE-2023-22809 sudoedit
++    UNAFFECTED
++
++CVE-2021-3156 sudo heap overflow
++    UNAFFECTED
++
++CVE-2021-4034 PwnKit
++    UNAFFECTED
++
++CVE-2019-5736 runc /proc/self/exe overwrite
++    UNAFFECTED
++
++CVE-2022-0847 Dirty Pipe
++    UNAFFECTED / data-integrity gap
++
++CVE-2016-5195 Dirty COW
++    UNAFFECTED / data-integrity gap
++
++CVE-2022-0185 filesystem-context kernel memory corruption
++    OUT_OF_MODEL
++
++CVE-2021-22555 netfilter kernel heap corruption
++    OUT_OF_MODEL
++
++CVE-2018-1002105 Kubernetes API authorization issue
++    OUT_OF_MODEL for filesystem authority
++```
++
++Important classification meanings:
++
++```text
++PREVENTED:
++    dangerous primitive unavailable because required authority absent
++
++CONTAINED:
++    bug may still trigger but impact is bounded by delegated authority
++
++UNAFFECTED:
++    authority model does not stop the relevant original path
++
++OUT_OF_MODEL:
++    trust boundary is below or outside the filesystem authority model
++```
++
++Do not claim the current qualified kernel contains these historical vulnerabilities.
++
++Synthetic primitives and source analysis were used rather than weaponized old exploits.
++
++---
++
++# The `/proc/self/fd` attenuation failure
++
++The security evaluation found another important failure.
++
++A READ-only derived FD correctly rejected:
++
++```text
++write(fd)
++```
++
++But when ordinary DAC still permitted access to the underlying inode:
++
++```text
++open("/proc/self/fd/<read-only-fd>", O_WRONLY)
++```
++
++could establish a fresh writable descriptor.
++
++The important conclusion was:
++
++> This was not fundamentally a procfs special case.
++
++The process still possessed another stronger authority source:
++
++```text
++ambient DAC
++```
++
++The attenuated FD itself remained weak, but the process could acquire another capability independently.
++
++Therefore FD attenuation alone cannot mean whole-process confinement while independent ambient authority remains available.
++
++This result strongly motivated mandatory process authority domains.
++
++---
++
++# Why `/proc` was not special-cased
++
++A path-specific fix such as:
++
++```text
++block /proc/self/fd reopen
++```
++
++was rejected.
++
++That would merely hide one capability-reacquisition path.
++
++The architectural solution must ensure that **every fresh establishment of handled authority** is checked against the process's mandatory authority ceiling.
++
++Thus reopening via:
++
++```text
++/proc/self/fd
++original pathname
++symlink
++hard link
++renamed pathname
++```
++
++must derive from the same semantic rule where applicable.
++
++---
++
++# Mandatory authority domains
++
++The prototype then introduced an opt-in irreversible confinement mode.
++
++For handled semantic operations, ordinary DAC is no longer allowed to exceed the explicit authority domain.
++
++Conceptually, the additive model:
++
++\[
++DAC \lor SemanticAuthority
++\]
++
++became, for handled operations inside a confined domain, closer to:
++
++```text
++semantic authority defines the operational ceiling
++
++independent kernel restrictions still apply
++```
++
++The exact implementation may still integrate with generic DAC at specific points, so document source reality rather than presenting the formula as literal call ordering.
++
++---
++
++# Mandatory-domain key result
++
++Runtime tests established, for the currently wired operation set, that:
++
++```text
++UID ownership does not exceed handled authority
++
++ordinary DAC mode permission does not exceed handled authority
++
++root does not exceed handled authority
++
++CAP_DAC_OVERRIDE does not exceed handled authority
++```
++
++inside confinement.
++
++At the same time, explicit semantic authority can still authorize selected operations that generic DAC would deny.
++
++This is important.
++
++The system is not intended to become merely a deny-only filter.
++
++---
++
++# Positive grant + mandatory ceiling
++
++The long-term distinctive property is:
++
++```text
++outside explicit confined authority:
++    deny handled operation even if DAC permits it
++
++inside explicit authority:
++    semantic grant may permit the operation
++    even if generic DAC would deny it
++
++independent LSM/FS restrictions:
++    may still deny
++```
++
++Thus the model is stronger than simple:
++
++\[
++Effective = DAC \cap Sandbox
++\]
++
++because the explicit authority system also supports narrowly scoped positive grants.
++
++---
++
++# Irreversibility of confinement
++
++Once a process enters confinement, the restriction must not be removable from inside that authority lineage.
++
++Later acquisition of conventional privilege must not allow:
++
++```text
++leave confinement
++
++re-enable DAC as a widening source
++
++restore dropped semantic rights
++
++add scopes
++
++turn handled rights back into unhandled rights
++```
++
++This is an essential fail-closed invariant.
++
++---
++
++# fork and exec
++
++Confinement must survive:
++
++```text
++fork
++ordinary exec
++```
++
++without increasing authority.
++
++Privileged exec is especially important.
++
++Historical additive behavior cleared semantic positive authority on setuid/file-cap exec.
++
++That rule is unsafe if clearing the authority object also clears a mandatory restriction.
++
++The confinement design therefore treats restriction semantics separately from merely preserving positive grants.
++
++Runtime qualification included setuid/file-capability exec behavior under `no_new_privs`.
++
++Document the exact current implementation.
++
++---
++
++# no_new_privs
++
++The confinement work integrated `no_new_privs` into the security story for privileged-exec transitions.
++
++Document whether the current implementation:
++
++```text
++requires it
++sets it
++or relies on it in tests
++```
++
++rather than assuming.
++
++The important invariant is that exec cannot increase effective authority beyond the confined ceiling.
++
++---
++
++# Threading boundary
++
++Credential/domain installation in a multithreaded process was recognized as dangerous.
++
++A transition such as:
++
++```text
++thread A enters confinement
++thread B remains unrestricted
++```
++
++would defeat process-confinement claims.
++
++Document the current implementation's exact rule.
++
++If confinement entry is currently restricted to a single-threaded task, say so.
++
++If broader process-wide semantics exist, describe them accurately.
++
++Do not infer.
++
++---
++
++# Pre-existing FDs are intentionally retained authority
++
++Mandatory process confinement does **not** imply universal revocation of all previously established file descriptors.
++
++Example:
++
++```text
++RDWR FD obtained before confinement
++```
++
++may remain RDWR afterward.
++
++That FD is already a capability.
++
++Likewise explicitly imported FDs through SCM_RIGHTS are delegated authority.
++
++This is intentional and must be distinguished from:
++
++```text
++ambient DAC manufacturing a fresh capability
++```
++
++A future launcher therefore needs FD hygiene:
++
++```text
++close unwanted FDs
++attenuate retained FDs
++retain intentional FDs
++enter confinement
++exec workload
++```
++
++---
++
++# DAC conceptual evolution
++
++A major architectural discussion concerned whether DAC should be removed entirely.
++
++That is **not** the current intended direction.
++
++The more useful model is:
++
++> DAC remains a coarse legacy/default policy and compatibility mechanism, while explicit semantic authority can define finer per-process operational authority.
++
++Ownership metadata should remain.
++
++Do not propose deleting:
++
++```text
++UID/GID
++inode ownership
++mode bits
++POSIX ACLs
++chmod/chown
++umask
++quota/accounting identity
++```
++
++---
++
++# Identity / ownership versus effective authority
++
++The desired distinction is:
++
++```text
++file owner = alice
++```
++
++still matters for:
++
++```text
++ls/stat
++quota
++audit
++administration
++legacy software
++default Unix policy
++```
++
++but:
++
++```text
++process UID = alice
++```
++
++does not necessarily mean:
++
++```text
++this process may exercise all of Alice's recoverable DAC authority
++```
++
++inside a confined domain.
++
++This enables voluntary self-attenuation without changing file ownership.
++
++---
++
++# chmod self-regrant insight
++
++Traditional DAC has an important property:
++
++```text
++Alice owns file
++chmod 000 file
++```
++
++does not really remove Alice's recoverable authority because Alice can normally later:
++
++```text
++chmod 0600 file
++```
++
++Again.
++
++Under a mandatory semantic authority ceiling, changing DAC metadata should not regenerate missing semantic authority.
++
++Conceptually:
++
++```text
++change legacy DAC policy
++!=
++increase confined process authority
++```
++
++Therefore even if a currently unmodeled metadata operation such as chmod succeeds, a subsequent fresh WRITE_FILE operation should remain denied if WRITE_FILE is outside the domain.
++
++Metadata authority itself remains incompletely modeled.
++
++---
++
++# DAC as a possible compatibility provider
++
++The long-term architectural possibility is:
++
++```text
++semantic operation
++        ↓
++Authority decision layer
++       / \
++      /   \
++explicit   legacy DAC
++authority  compatibility provider
++```
++
++For normal unconfined processes, traditional behavior could remain conceptually equivalent to:
++
++```text
++explicit semantic authority
++OR
++legacy DAC authorization
++```
++
++For confined processes:
++
++```text
++explicit semantic domain is an upper bound
++and DAC cannot widen beyond it
++```
++
++This is a conceptual direction, not yet a completed refactor.
++
++---
++
++# Do not eagerly translate DAC into millions of capabilities
++
++A rejected idea is to enumerate every file currently accessible through DAC and instantiate explicit capabilities for all of them.
++
++That would become stale and unmanageable across:
++
++```text
++chmod
++chown
++ACL changes
++new files
++mount changes
++idmapped mounts
++```
++
++If DAC becomes a provider, it should be evaluated lazily from current subject/object context.
++
++Conceptually:
++
++```text
++legacy_dac_authorizes(
++    subject,
++    semantic_operation,
++    object_context
++)
++```
++
++rather than materializing an enormous static capability set.
++
++---
++
++# DAC is not merely r/w/x translation
++
++Another crucial finding:
++
++Traditional mode bits are coarse and context-dependent.
++
++Directory `w+x`, for example, participates in several semantically distinct operations:
++
++```text
++create
++unlink
++rename
++link
++```
++
++Therefore a future DAC provider should answer:
++
++> Would traditional Unix DAC authorize this specific semantic operation?
++
++It should not merely map:
++
++```text
++r -> READ_FILE
++w -> WRITE_FILE
++x -> EXEC
++```
++
++globally.
++
++This is one of the strongest arguments for a semantic authority vocabulary.
++
++---
++
++# Read-only DAC architecture audit
++
++A later read-only audit evaluated whether generic DAC could realistically become such a provider.
++
++Its verdict was:
++
++```text
++PARTIALLY FEASIBLE
++```
++
++Important conclusions:
++
++1. Generic Unix mode/ACL/capability permission logic can plausibly be factored conceptually as a legacy provider.
++
++2. Filesystem-specific permission callbacks should remain independent, fail-closed layers.
++
++3. The prototype currently centralizes:
++   - authority storage
++   - scope representation
++   - matching
++
++   but does **not** yet fully centralize:
++   - operation classification
++   - authorization decision points.
++
++4. Semantic checks, DAC checks, FD capabilities, filesystem callbacks, and operation-specific VFS checks remain distributed.
++
++5. Operation context is required; an authority decision often cannot be made from subject+inode alone.
++
++6. Mount/idmap context matters.
++
++7. Established FD capabilities must remain distinct from fresh pathname authorization.
++
++This must be documented clearly.
++
++---
++
++# Authority State Core versus Authorization Decision Core
++
++One of the DAC audit's most important conceptual clarifications was:
++
++> The prototype currently has something close to a centralized Authority State Core, but not yet a single centralized Authorization Decision Core.
++
++Centralized today:
++
++```text
++authority objects
++rights
++scopes
++matching primitives
++```
++
++Still distributed:
++
++```text
++semantic operation identification
++VFS integration
++generic DAC
++mandatory checks
++FD semantics
++filesystem-specific permission hooks
++structural checks
++```
++
++This distinction should appear prominently in the architecture documentation.
++
++---
++
++# LSM layering
++
++Do not treat LSMs as positive interchangeable authority providers.
++
++The intended layering remains closer to:
++
++\[
++FinalAllow =
++AuthorityDecision
++\land
++LSMDecision
++\land
++FilesystemStructuralValidity
++\]
++
++An SELinux/AppArmor/etc. denial should not be overridden merely because an explicit semantic capability exists.
++
++Runtime qualification with an enforcing LSM remains incomplete unless current reports establish otherwise.
++
++Mark this honestly.
++
++---
++
++# Filesystem-specific permission callbacks
++
++Generic Unix DAC and filesystem-specific permission behavior should not be conflated.
++
++The DAC audit concluded that a future generic DAC compatibility provider might be feasible while leaving:
++
++```text
++inode->i_op->permission
++```
++
++or equivalent filesystem-specific policy outside it.
++
++These additional filesystem policies should remain fail-closed.
++
++This avoids claiming authority over decisions that remote/custom filesystems may implement differently.
++
++---
++
++# Structural restrictions remain independent
++
++The authority system intentionally does not replace fundamental filesystem/VFS constraints such as:
++
++```text
++EROFS
++immutable
++append-only
++EXDEV
++mountpoint restrictions
++filesystem operation validity
++```
++
++These are not simply "another positive authority source."
++
++They remain independent ways to make an otherwise-authorized operation fail.
++
++---
++
++# Positive grant source versus deny layer
++
++Document this important classification.
++
++The dangerous fragmentation for confinement comes especially from multiple independent mechanisms capable of turning:
++
++```text
++deny -> allow
++```
++
++Examples historically include:
++
++```text
++DAC ownership/mode/ACL
++Linux DAC-bypass capabilities
++explicit semantic grants
++pre-existing/imported FDs
++```
++
++By contrast, mechanisms that can only further restrict:
++
++```text
++LSM deny
++EROFS
++immutable
++structural VFS checks
++```
++
++do not undermine a common upper-bound authority model in the same way.
++
++This distinction should guide future TCB analysis.
++
++---
++
++# Single-point-of-trust claim must be modest
++
++Do not claim that the prototype already has one authorization point.
++
++A better statement is:
++
++> The design attempts to regularize and reduce positive authority sources and centralize authority state, but operation-specific authorization integration is still distributed.
++
++A single authority core also becomes a critical trusted computing base.
++
++Centralization improves auditability only if bypass paths are actually eliminated.
++
++Therefore the project should track:
++
++```text
++all places that can grant authority
++all places that establish capability-bearing objects
++all ways equivalent operations enter the VFS
++```
++
++---
++
++# AI-agent use case
++
++A motivating eventual workflow is:
++
++```text
++user / broker
++    broad authority
++
++        ↓ constructs restricted domain
++
++AI agent
++    same or separate UID
++    task-specific authority
++
++        ↓ derives weaker handles
++
++tools / parsers / subprocesses
++    smaller capabilities
++```
++
++Example:
++
++```text
++Agent:
++    READ project
++    WRITE project/src
++    CREATE project/build
++
++No authority:
++    ~/.ssh
++    unrelated documents
++    other projects
++```
++
++The important property is that UID identity alone does not restore these omitted rights.
++
++Existing software should ideally remain unchanged; a launcher/broker constructs the authority before exec.
++
++---
++
++# Shell / launcher UX concept
++
++Historical conceptual syntax included examples such as:
++
++```text
++permit fs:create,write:/downloads net:connect -- curl ...
++```
++
++or similar.
++
++These are only UX sketches.
++
++The pathname supplied by the user-facing launcher is a resolution input.
++
++The resulting kernel security object should remain object-backed rather than a permanent string-prefix policy.
++
++Do not document example syntax as committed UAPI.
++
++---
++
++# Historical CVE lesson
++
++The security experiment should be recorded not as:
++
++```text
++the model prevents CVEs
++```
++
++but as:
++
++```text
++historical bugs were used to test security primitives and model boundaries
++```
++
++The biggest lesson from the initial run was that opt-in positive grants without mandatory confinement did not protect unmodified applications.
++
++This directly caused the architecture to evolve.
++
++The documentation should show this causal chain:
++
++```text
++positive semantic grants
++        ↓
++CVE/security evaluation
++        ↓
++ambient DAC bypass found
++        ↓
++FD reopen recovery found
++        ↓
++additive model judged insufficient
++        ↓
++mandatory authority domains introduced
++```
++
++This history is especially important for future reviewers.
++
++---
++
++# Kernel-corruption trust boundary
++
++Arbitrary kernel memory corruption or kernel code execution remains out of model.
++
++Examples such as historical netfilter/filesystem-context kernel memory corruption demonstrate that if the kernel itself is compromised, an in-kernel authority mechanism can be bypassed or overwritten.
++
++Do not claim otherwise.
++
++The authority core is part of the kernel TCB.
++
++---
++
++# Current known major model gaps
++
++Document current status accurately, including at least:
++
++```text
++LINK / hard-link creation
++O_TMPFILE publication via linkat(AT_EMPTY_PATH)
++
++mkdir
++rmdir
++symlink creation
++mknod
++
++directory listing
++full directory traversal/visibility
++
++chmod
++chown
++xattrs
++timestamps / other metadata mutation
++
++EXEC authority
++
++generic ioctl
++
++complete mmap semantics
++
++all async/io_uring variants
++
++all filesystems
++
++NFS/FUSE/overlay semantics
++
++enforcing LSM runtime qualification
++
++full ACL-specific qualification
++
++idmapped mount runtime coverage
++
++rename race stress
++
++lease/delegation edge cases
++
++complete mount topology coverage
++```
++
++Do not imply these are all vulnerabilities.
++
++Classify each as:
++
++```text
++unmodeled operation
++unqualified implementation path
++known bypass of a claimed operation
++or deliberate boundary
++```
++
++as appropriate.
++
++---
++
++# Current known concrete boundary: LINK publication
++
++This must be prominent in current status.
++
++Current observed behavior:
++
++```text
++confined process creates O_TMPFILE with valid CREATE/data authority
++
++linkat(..., AT_EMPTY_PATH)
++
++publishes it outside the CREATE scope
++```
++
++The publication succeeds.
++
++Fresh writes at the destination remain denied without WRITE authority.
++
++Therefore:
++
++```text
++data confinement remains effective for fresh access
++```
++
++but:
++
++```text
++namespace insertion confinement is incomplete
++```
++
++The next likely semantic area is LINK/PUBLISH.
++
++Do not hide this result.
++
++---
++
++# Current qualification status
++
++The most recent reported continuation established:
++
++```text
++full external kernel build:
++    PASS
++
++isolated QEMU creation suite:
++    zero failures
++
++mandatory confinement suite:
++    zero failures
++
++FD-capability suite:
++    zero failures
++
++DELETE suite:
++    zero failures
++
++RENAME suite:
++    zero failures
++
++git diff --check:
++    PASS
++```
++
++The worktree remains intentionally uncommitted.
++
++No remote is configured.
++
++No host kernel deployment/reboot occurred.
++
++Verify current repository state before documenting it as current.
++
++---
++
++# Historical full-build discipline
++
++A recurring qualification rule has been:
++
++```text
++clean external Debian build environment
++full kernel build
++exact built image
++isolated QEMU/KVM boot
++runtime tests
++```
++
++rather than relying only on unit-like source tests.
++
++Preserve this distinction in documentation.
++
++"Source-reviewed" must never silently become "runtime-qualified."
++
++---
++
++# No complete sandbox claim
++
++Even after mandatory confinement, the project is **not currently a complete process sandbox**.
++
++The strongest justified claim is closer to:
++
++> An opt-in irreversible mandatory authority domain is implemented and qualified for a defined subset of semantic filesystem operations.
++
++Do not claim:
++
++```text
++all filesystem operations are mediated
++
++all Linux authority is unified
++
++complete sandbox
++
++complete DAC replacement
++
++complete LSM replacement
++```
++
++---
++
++# Important design non-goals
++
++Document at least:
++
++```text
++do not replace every Linux security mechanism
++
++do not remove UID/GID ownership
++
++do not make every process use explicit authority
++
++do not make LSMs obsolete
++
++do not make namespaces/cgroups/seccomp obsolete
++
++do not claim kernel-bug containment
++
++do not treat path strings as stable object authority
++
++do not silently revoke every pre-existing FD
++
++do not compose semantically different rights merely because Unix DAC uses the same mode bit
++```
++
++---
++
++# Complementary Linux mechanisms
++
++The project is intended to provide one common semantic authority substrate for a class of filesystem authority decisions.
++
++Other mechanisms remain complementary:
++
++```text
++seccomp:
++    syscall filtering
++
++cgroups:
++    resource governance
++
++namespaces:
++    system-view / resource isolation
++
++LSMs:
++    mandatory policy
++
++traditional DAC:
++    compatibility/default Unix policy
++
++explicit authority:
++    fine-grained operational delegation/confinement
++```
++
++Do not present the prototype as replacing all of these.
++
++---
++
++# Key invariants section
++
++Create a prominent concise invariant list.
++
++It should include at least:
++
++### Identity
++
++```text
++identity != authority
++```
++
++### Monotonic process authority
++
++\[
++A_{future} \subseteq A_{current}
++\]
++
++within one authority lineage.
++
++### Monotonic FD derivation
++
++\[
++FD_{child} \subseteq FD_{parent}
++\]
++
++### No local restoration
++
++Removed authority cannot be recreated from the weaker capability/domain itself.
++
++### Object-backed scope
++
++Authority attaches to resolved object/mount identity, not permanent pathname spelling.
++
++### Established capability persistence
++
++Dropping pathname authority does not retroactively revoke intentionally retained established FDs.
++
++### Data != namespace
++
++```text
++READ/WRITE != CREATE/DELETE/RENAME/LINK
++```
++
++### CREATE does not mint data authority
++
++\[
++CREATE \not\Rightarrow READ
++\]
++
++\[
++CREATE \not\Rightarrow WRITE
++\]
++
++inside confinement.
++
++### Multi-target operations require conjunction
++
++For cross-parent rename:
++
++\[
++Rename(A,B)
++=
++Authority(A)
++\land
++Authority(B)
++\]
++
++### Namespace removal != object revocation
++
++Unlinking an object does not invalidate already-established file capabilities.
++
++### Fresh authority establishment is checked
++
++An attenuated handle must not regain removed authority merely by reopening the same object through another name when mandatory mediation covers the requested operation.
++
++### Independent restrictions remain authoritative
++
++Explicit authority does not bypass LSM denials, EROFS, immutable state, or other unrelated structural restrictions.
++
++### Conventional privilege cannot widen confinement
++
++UID 0 / DAC-bypass capabilities must not exceed the handled mandatory authority ceiling.
++
++---
++
++# Decision / branch history
++
++Create a section that explicitly records important forks in the design.
++
++Use a structure such as:
++
++```text
++Question
++Candidate A
++Candidate B
++Evidence
++Decision
++Reason
++Remaining consequence
++```
++
++Include at least the following forks.
++
++---
++
++## Fork: fixed mask vs extensible bitmap
++
++Rejected:
++
++```text
++fixed 64-bit semantic mask
++```
++
++Chosen:
++
++```text
++extensible bitmap with >64-bit qualification
++```
++
++Reason:
++
++Future semantic rights must not require breaking internal assumptions/UAPI.
++
++---
++
++## Fork: pathname prefixes vs object-backed scopes
++
++Rejected:
++
++```text
++string-prefix authority
++```
++
++Chosen:
++
++```text
++pinned object/path identity
++```
++
++Reason:
++
++rename/symlink/replacement/bind semantics.
++
++---
++
++## Fork: ambient traversal vs bounded handle-first traversal
++
++Rejected:
++
++```text
++automatic semantic traversal through arbitrary ancestor lookup
++```
++
++Chosen:
++
++```text
++bounded openat2-style reachability
++```
++
++Reason:
++
++avoid leaking unrelated sibling namespace reachability before final target identity is known.
++
++---
++
++## Fork: data WRITE implies DELETE
++
++Rejected.
++
++Chosen:
++
++```text
++WRITE_FILE and DELETE_FILE are independent
++```
++
++Reason:
++
++unlink mutates parent namespace, not file contents.
++
++---
++
++## Fork: DELETE + CREATE implies RENAME
++
++Rejected.
++
++Chosen:
++
++```text
++RENAME is a distinct atomic semantic operation
++```
++
++including authority over every required parent.
++
++---
++
++## Fork: dup as attenuated child
++
++Rejected conceptually.
++
++Chosen:
++
++```text
++dup shares same capability
++
++F_CLONEFD_CAP derives independent weaker capability
++```
++
++---
++
++## Fork: active/disabled rights with hidden ceiling
++
++Rejected.
++
++Chosen:
++
++```text
++current rights are the maximum authority of that capability
++```
++
++A weaker capability has no hidden larger set that can later be re-enabled.
++
++---
++
++## Fork: special-case /proc FD reopen
++
++Rejected.
++
++Chosen:
++
++```text
++fix fresh authority establishment at the common authority level
++```
++
++Reason:
++
++`/proc/self/fd` exposed ambient DAC as the real problem.
++
++---
++
++## Fork: additive authority as sandbox
++
++Failed.
++
++Evidence:
++
++DAC-authorized operations outside scopes remained available.
++
++Chosen:
++
++```text
++optional irreversible mandatory authority domain
++```
++
++for handled operations.
++
++---
++
++## Fork: remove DAC entirely
++
++Rejected as the current direction.
++
++Chosen conceptual direction:
++
++```text
++DAC remains coarse compatibility/default policy
++
++explicit authority provides finer process-specific operational authority
++```
++
++Possible future implementation:
++
++```text
++DAC as a compatibility provider to a common semantic authority layer
++```
++
++---
++
++## Fork: eagerly convert DAC rights into explicit capabilities
++
++Rejected.
++
++Reason:
++
++dynamic filesystem state, ACL/chmod/chown, mounts, new files, idmaps make this stale/unscalable.
++
++Possible future model is lazy DAC evaluation.
++
++---
++
++## Fork: CREATE mints initial file access
++
++Rejected for confined domains.
++
++Chosen:
++
++```text
++CREATE does not mint READ/WRITE
++```
++
++Requested initial descriptor modes independently require the corresponding semantic data authority.
++
++---
++
++# Failure / lesson section
++
++Create a dedicated section named something like:
++
++```text
++Failures That Changed the Architecture
++```
++
++Do not bury these in chronology.
++
++At minimum include:
++
++### 1. Additive authority was not confinement
++
++Observed:
++
++```text
++UID-owned outside file remained writable through DAC
++```
++
++Lesson:
++
++Positive grants alone cannot restrict ambient authority.
++
++Result:
++
++Mandatory domains.
++
++---
++
++### 2. FD attenuation did not constrain whole-process authority
++
++Observed:
++
++```text
++READ-only clone
++write -> denied
++
++fresh /proc/self/fd O_WRONLY open
++-> writable descriptor via DAC
++```
++
++Lesson:
++
++An attenuated FD can only constrain authority derived from that FD.
++
++It cannot remove independent ambient authority sources.
++
++Result:
++
++Mandatory fresh-open mediation.
++
++---
++
++### 3. CREATE could implicitly mint data authority
++
++Observed/source-audited concern:
++
++Newly created file descriptions could gain requested read/write access through legacy creation semantics without independent semantic data authority.
++
++Lesson:
++
++Capability-producing operations require explicit output-authority semantics.
++
++Result:
++
++CREATE no longer mints READ/WRITE in confined domains.
++
++---
++
++### 4. O_TMPFILE publication escapes current namespace model
++
++Observed:
++
++```text
++linkat(... AT_EMPTY_PATH)
++```
++
++can publish outside CREATE scope.
++
++Lesson:
++
++Object creation and namespace insertion are distinct operations.
++
++Result:
++
++LINK/PUBLISH identified as missing semantic authority.
++
++Still unresolved.
++
++---
++
++### 5. Historical CVEs were mostly unaffected by the additive prototype
++
++Lesson:
++
++Security claims must distinguish:
++
++```text
++protecting an integrated semantic path
++```
++
++from:
++
++```text
++protecting arbitrary unmodified applications
++```
++
++Result:
++
++Stronger mandatory mediation and more modest claims.
++
++---
++
++# Timeline
++
++Create a concise but useful chronological timeline approximately covering:
++
++```text
++1. Broad AUTH_NORMAL/AUTH_SYSTEM proof
++2. Extensible authority object/bitmap
++3. Object-backed scopes
++4. CREATE
++5. bounded TRAVERSE
++6. READ
++7. WRITE
++8. FD semantic/source audit
++9. FD attenuation/derivation
++10. DELETE
++11. RENAME / multi-target authority
++12. historical-CVE security evaluation
++13. discovery of ambient DAC + FD reopen failures
++14. mandatory confinement
++15. DAC architecture audit
++16. discovery of creation-time authority minting
++17. CREATE-does-not-mint-data rule
++18. O_TMPFILE LINK publication gap
++19. current next question: LINK/PUBLISH before broad DAC refactor
++```
++
++For each milestone include:
++
++```text
++question
++result
++new invariant or changed assumption
++```
++
++Keep the timeline readable; move technical details to the architecture sections.
++
++---
++
++# Terminology
++
++Define stable terminology.
++
++At minimum distinguish:
++
++```text
++identity
++
++ownership
++
++legacy DAC policy
++
++semantic authority
++
++authority domain
++
++confined domain
++
++scope
++
++right
++
++fresh authority establishment
++
++established capability
++
++FD capability
++
++attenuation
++
++derivation
++
++delegation
++
++namespace authority
++
++object/data authority
++
++positive grant source
++
++deny-only layer
++
++structural restriction
++
++broker
++```
++
++Future LLMs should not use these interchangeably.
++
++---
++
++# Qualification taxonomy
++
++Document the exact meaning of labels such as:
++
++```text
++QUALIFIED
++PARTIALLY QUALIFIED
++SOURCE-REVIEWED
++UNQUALIFIED
++BLOCKED
++FAILED
++OUT_OF_MODEL
++```
++
++Suggested meanings:
++
++```text
++QUALIFIED:
++    relevant path tested on exact built kernel in isolated runtime
++
++SOURCE-REVIEWED:
++    source flow inspected but no corresponding runtime proof
++
++PARTIALLY QUALIFIED:
++    subset tested; meaningful uncovered cases remain
++
++UNQUALIFIED:
++    no defensible claim
++
++BLOCKED:
++    known dependency prevents meaningful qualification
++
++FAILED:
++    intended invariant was tested and violated
++
++OUT_OF_MODEL:
++    mechanism lies outside the stated trust/security boundary
++```
++
++Adjust to project conventions if needed.
++
++---
++
++# Threat model
++
++Document what the prototype is trying to constrain.
++
++Example intended threat:
++
++```text
++untrusted or compromised user-space worker/agent
++running on a trusted kernel
++that should receive only task-specific filesystem authority
++```
++
++Potentially with:
++
++```text
++same UID as broader user identity
++```
++
++while avoiding that UID's full ambient authority.
++
++Explicitly exclude:
++
++```text
++arbitrary kernel memory corruption
++
++kernel code execution
++
++malicious kernel modules
++
++hardware compromise
++```
++
++unless the project later changes scope.
++
++---
++
++# Security model for established FDs
++
++Future readers must understand:
++
++```text
++process domain
++```
++
++is not necessarily the complete set of authority the process holds.
++
++More accurate conceptual model:
++
++```text
++effective task authority
++    =
++mandatory semantic domain
+++
++intentionally retained/imported established capabilities
+++
++currently unmodeled channels
++```
++
++This is why sandbox launch requires descriptor hygiene.
++
++Do not write:
++
++```text
++domain is literally all process authority
++```
++
++unless that becomes true later.
++
++---
++
++# DAC provider open questions
++
++Record the DAC-provider concept as future work, not current architecture.
++
++Questions that remain include:
++
++```text
++How should operation context be represented?
++
++How should mount idmaps be passed?
++
++How should generic POSIX ACL evaluation fit?
++
++Which Linux capabilities belong inside the legacy provider?
++
++Which ownership/capability checks are metadata-authority rather than DAC?
++
++Where should filesystem-specific permission callbacks remain?
++
++Can operation-specific VFS checks be factored without duplicating semantics?
++
++How many positive grant paths still bypass a common decision core?
++```
++
++The DAC audit verdict is currently:
++
++```text
++PARTIALLY FEASIBLE
++```
++
++not:
++
++```text
++ready for wholesale conversion
++```
++
++---
++
++# Why LINK should probably precede broad DAC refactoring
++
++The current architecture still lacks a semantic representation for namespace insertion of an existing object.
++
++Classic directory DAC uses coarse permissions for this operation.
++
++Trying to build a semantic DAC provider before deciding what LINK/PUBLISH means risks centralizing an incomplete semantic vocabulary.
++
++Therefore document the current likely sequencing:
++
++```text
++qualify LINK / publication semantics
++        ↓
++revisit remaining namespace operations
++        ↓
++then consider minimum DAC compatibility-provider experiment
++```
++
++This is a research direction, not a mandatory implementation roadmap.
++
++---
++
++# Upstream/RFC perspective
++
++Include a short section for future RFC preparation.
++
++Important framing:
++
++Do **not** pitch:
++
++```text
++replace Unix permissions
++replace Landlock
++replace LSMs
++new complete Linux security model
++```
++
++A stronger framing is:
++
++> Separate ownership/identity from per-process operational authority while retaining Unix DAC as the compatibility/default policy.
++
++Likely reviewer questions include:
++
++```text
++Why not Landlock?
++
++Why not an LSM?
++
++Why not Linux capabilities?
++
++Why positive authority that can override DAC?
++
++Why VFS integration?
++
++Why this UAPI?
++
++What is the concrete userspace use case?
++
++How does this interact with arbitrary filesystems?
++
++Where is the TCB?
++```
++
++The documentation should preserve enough reasoning to answer these later.
++
++Do not write a final RFC in this task.
++
++---
++
++# Landlock relationship
++
++Document the conceptual relationship carefully.
++
++Landlock validates several principles:
++
++```text
++monotonic restriction
++child inheritance
++semantic filesystem rights
++unprivileged self-restriction
++```
++
++But Landlock is primarily an additional restriction layer.
++
++It does not provide the prototype's central positive-grant property:
++
++```text
++explicit narrowly scoped authority may authorize an operation
++that traditional DAC would deny
++```
++
++The prototype therefore explores a different but related space.
++
++Do not frame Landlock as simply a competitor.
++
++---
++
++# Current implementation references
++
++While writing the docs, inspect the actual current implementation and link concepts to important source files/functions where stable enough.
++
++Examples likely include:
++
++```text
++kernel authority implementation
++authority headers
++fs/namei.c semantic integration
++FD capability implementation
++fcntl UAPI integration
++cred integration
++tests
++```
++
++Do not hardcode stale line numbers unless useful and stable.
++
++Prefer:
++
++```text
++file + function/symbol
++```
++
++references.
++
++Clearly label historical symbols that no longer exist.
++
++---
++
++# Documentation quality requirements
++
++The finished documentation should be understandable without this prompt.
++
++Do not write phrases such as:
++
++```text
++as discussed earlier
++as the user said
++from the previous conversation
++```
++
++The repository docs must stand alone.
++
++Prefer explanation such as:
++
++```text
++The first additive implementation permitted ordinary DAC access outside
++semantic scopes. A synthetic QEMU test demonstrated this using a
++UID-owned file. This invalidated the original confinement assumption
++and motivated mandatory authority domains.
++```
++
++That preserves both the result and why it mattered.
++
++---
++
++# Preserve uncertainty
++
++If current source or reports do not support a precise statement, write:
++
++```text
++not yet qualified
++```
++
++or:
++
++```text
++historical design intent; current implementation should be verified
++```
++
++Do not reconstruct missing facts from intuition.
++
++The purpose of these docs is to prevent future architectural hallucination.
++
++---
++
++# Final consistency pass
++
++After writing the documentation, verify:
++
++```text
++every major right has defined semantics
++
++every major historical failure is recorded
++
++all current known gaps are visible
++
++positive grants are distinguished from deny layers
++
++FD capabilities are distinguished from pathname authority
++
++mandatory confinement is distinguished from additive mode
++
++DAC-removal is not presented as the goal
++
++CREATE-does-not-mint-data is explicit
++
++O_TMPFILE publication gap is explicit
++
++LINK/PUBLISH remains unresolved
++
++no complete-sandbox claim appears
++
++runtime qualification and source review are not conflated
++```
++
++Search the docs for contradictory statements.
++
++Pay special attention to older assumptions that were later invalidated.
++
++If an old statement is historically relevant, preserve it as:
++
++```text
++Earlier assumption
++→ evidence
++→ revised model
++```
++
++rather than deleting the history.
++
++---
++
++# Required final response
++
++Report:
++
++```text
++documentation files created/updated
++
++main sections added
++
++historical reports/source used
++
++important inconsistencies found between historical context and current code
++
++anything that could not be verified
++
++git diff --check result
++
++git diff --stat limited to documentation changes
++
++confirmation that implementation files were untouched
++
++confirmation of no commit/push/remote/deployment/reboot
++```
++
++Do not perform additional architecture implementation after finishing the documentation.
++
++The goal of this task is to leave the repository with enough durable architectural memory that a future LLM can recover the project model from the repository itself even after severe conversation-context compaction.
+diff --git a/Documentation/authority/architecture.md b/Documentation/authority/architecture.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..9af1870a0920e6cfb1b5a9579875a09be0a34391
+--- /dev/null
++++ b/Documentation/authority/architecture.md
+@@ -0,0 +1,313 @@
++# Filesystem authority prototype: architecture and invariants
++
++> **Status:** experimental Linux 7.3.0-rc5 prototype. This document distinguishes design intent from the narrower current implementation. It is not a security certification, an upstream design, or a claim of complete mediation. For history and evidence, see [design-history.md](design-history.md) and [qualification-status.md](qualification-status.md).
++
++The frozen reference is [Filesystem Authority v1 — Experimental baseline](FILESYSTEM-V1-BASELINE.md),
++**CONDITIONAL GO** within its recorded conditions, not a sanitizer-clean or
++production-ready kernel. Future class work is planning only and must preserve
++[the common regression requirements](FUTURE-REGRESSION.md).
++
++## 1. Problem and threat model
++
++Traditional Unix often couples identity and filesystem permission:
++
++```text
++process UID/GID/groups -> ownership/mode/ACL -> ambient operation authority
++```
++
++The prototype explores a stronger separation:
++
++```text
++identity != authority
++```
++
++UID/GID remain relevant to ownership, accountability, audit, quotas, compatibility, and legacy policy. They need not define everything a particular process can do. A process running as Alice may deliberately retain `READ project-A` and `WRITE project-A/src` while being unable to exercise Alice's ordinary DAC access to `project-B`, `~/.ssh`, or `~/Documents`.
++
++**Intended threat:** a possibly compromised user-space worker/agent running on a trusted kernel should be limited to task-specific filesystem operations, potentially while retaining the user's UID. A stronger broker can perform an operation or delegate a narrower FD without making the requesting process globally stronger.
++
++**Out of trust boundary:** arbitrary kernel memory corruption or kernel code execution, malicious kernel modules, compromised hardware, and any authority source or operation not yet mediated. The in-kernel authority implementation is part of the kernel TCB.
++
++A useful model of effective task authority is not just its process domain:
++
++```text
++effective authority = mandatory semantic domain
++                   + intentionally retained/imported established capabilities
++                   + currently unmodeled authority channels
++```
++
++Consequently, a confined process is not automatically a complete sandbox. Launchers need FD hygiene: close, attenuate, or intentionally retain inherited descriptors before confinement/exec.
++
++## 2. Terminology
++
++| Term | Meaning in this project |
++|---|---|
++| **Identity** | UID/GID, fsuid/fsgid, groups, and related accountability/ownership context. Not synonymous with operational authority. |
++| **Ownership** | Inode owner/group metadata and its normal DAC meaning. Ownership is retained; sandboxing should not require chowning objects. |
++| **Legacy DAC** | Traditional mode/ACL and DAC-capability decision, evaluated in filesystem/mount context. It remains a compatibility/default mechanism; removing it is not the current goal. |
++| **Right** | A semantic operation/access kind, e.g. `FS_READ_FILE` or `FS_RENAME`. |
++| **Scope** | Authority rooted at a pinned kernel `struct path` (mount + dentry), not a permanent pathname string. Most rights cover descendants on the same mount; DELETE, RENAME, and LINK use exact parent identity. |
++| **Authority object/domain** | Credential-associated rights, scopes, and (when confined) the set of semantic operations whose authority is mandatory. |
++| **Fresh authority establishment** | An operation such as open/create that creates a new usable FD or other capability. Its output rights need an explicit authorization rule. |
++| **Established capability / FD capability** | Authority already embodied in an open file description. It can survive pathname-scope reduction and can be intentionally delegated. |
++| **Attenuation** | Removing rights from an existing FD capability. No re-enable operation exists. |
++| **Derivation** | Creating an independent child file description whose rights are a subset of a source capability. |
++| **Delegation** | Transferring authority already held, e.g. an FD via `SCM_RIGHTS`, or asking a broker to act. |
++| **Positive grant source** | A mechanism that can turn a generic-DAC denial into allow, such as an explicit semantic scope. These sources must be controlled in confinement. |
++| **Deny-only layer** | A layer that can reject an otherwise allowed operation but is not intended to grant it, e.g. an LSM denial or `EROFS`. |
++| **Structural restriction** | VFS/filesystem validity or topology constraint such as immutable state, mountpoint rules, `EXDEV`, or missing filesystem operation. |
++| **Broker** | A stronger principal that may deny, act itself, or delegate an exact weaker capability; the requester does not gain global authority. |
++
++## 3. Stable conceptual invariants
++
++These are design invariants. Where current code only covers a subset, that limitation is stated in §5 and in the qualification matrix.
++
++### 3.1 Temporal non-amplification
++
++**A_out ⊆ A_in** applies to every individual transformation, evaluated against
++its effective, legitimately supplied and delegable input at creation time,
++including applicable LSM constraints and independently authorized grants.
++It is not a permanent comparison with a former source's later reduced state.
++
++**A later reduction of the source's Authority does not retroactively invalidate a previously legitimate independent capability.**
++
++**A historical identity or credential snapshot is not automatically equivalent to a legitimately delegated Authority capability.**
++
++If A creates independent READ|WRITE B at T1, A's reduction to READ at T2 leaves
++B valid. A new clone from A at T3 cannot recover WRITE; a new clone explicitly
++from independently held B may retain it. A held valid capability is not a hidden
++ceiling manufactured from a smaller input. Provenance must identify the actual
++source, grant and boundary; the future `--no-delegation` flag is not implemented.
++
++FD restriction mutates a shared open-file-description ceiling. `dup()` and
++SCM_RIGHTS alias that state. F_CLONEFD_CAP creates a private snapshot bounded by
++source/request/mode and LSM checks; later source attenuation does not mutate it.
++Credential/Authority objects are immutable and replaced on local reduction;
++sharing their references does not make every holder's future task slot mutable.
++See [temporal semantics](temporal-semantics.md) for lifecycle, linearization,
++revocation and the qualified io_uring execution-context delegation contract.
++
++### 3.2 Object-backed scope, not pathname prefix
++
++A scope pins a `struct path`. Current matching uses mount identity and dentry ancestry (`is_subdir`) for ordinary scoped rights; DELETE and RENAME match an exact mount+dentry parent. Thus this is not a `/prefix/*` string policy. A pinned scope follows the dentry object through rename; replacing its old spelling does not transfer the pinned identity. A bind alias on a different mount is not automatically in scope.
++
++This identity model is deliberate, but it differs from inode-centric Unix DAC. Mount aliases, disconnected dentries, filesystem-specific path behavior, and races still need qualification.
++
++### 3.3 Semantic rights are not interchangeable
++
++The intended vocabulary distinguishes:
++
++```text
++READ_FILE / WRITE_FILE     data access
++CREATE_FILE                instantiate an object
++DELETE_FILE                remove a direct namespace entry
++RENAME                     atomically move/replace a name
++TRAVERSE                   directory search in bounded lookup contexts
++LINK                       add an existing non-directory object under a destination parent
++```
++
++In particular:
++
++\[
++WRITE\_FILE \ne DELETE\_FILE,\quad CREATE\_FILE \ne RENAME,
++\quad CREATE\_FILE \ne LINK,\quad LINK \ne DELETE,\quad LINK \ne RENAME
++\]
++
++A shared Unix mode bit is not sufficient reason to compose semantic operations. Hard-link creation creates a new name for an existing object; it does not create an inode, move/remove the source name, or write file data. Namespace insertion can increase future reachability even though it does not itself grant fresh data access.
++
++### 3.4 CREATE does not mint data authority
++
++In a confined domain:
++
++\[
++CREATE \not\Rightarrow READ, \qquad CREATE \not\Rightarrow WRITE
++\]
++
++Named missing-file `O_CREAT` requires CREATE on the parent **and** independent READ/WRITE scope for each requested initial descriptor access. Current `may_open_created_access()` requires those initial data scopes only when the corresponding READ/WRITE operation is handled; unhandled initial access retains Linux semantics. `O_TMPFILE` follows the same rule. Existing-file `O_CREAT` is not creation. `O_TRUNC` is separately a WRITE operation, even with `O_RDONLY|O_TRUNC`; the returned FD remains read-only if its access mode is read-only. Unconfined Linux behavior is intended to remain unchanged. Detailed evidence is in [create-file-authority.rst](../authority-prototype/create-file-authority.rst).
++
++### 3.5 Established capabilities persist
++
++Dropping path authority does not retroactively revoke a valid pre-existing file description or mapping. A read/write FD obtained before confinement or explicitly received over `SCM_RIGHTS` is already delegated authority. `pidfd_getfd()` similarly imports a reference to the target's existing `struct file` after ptrace-style authorization; it does not reopen the path or intersect the receiver's path scopes. Fresh opens, including procfs reopen, must be checked as fresh authority establishment for operations covered by the mandatory domain. A procfs FD link is a path to the existing file but reopening it creates a fresh file description and repeats the relevant open checks.
++
++#### Capability-establishment taxonomy (bounded audit)
++
++* **Fresh named-path description:** `open*`, `O_TMPFILE`, procfs FD reopen, `open_by_handle_at()`, and filesystem-specific handle opens. These resolve to a file description; where they open a regular data file, READ/WRITE ceilings must be checked on the fresh route. Ordinary open variants and io_uring `OPENAT` use the common open path. `O_TMPFILE` is an unlinked regular file on its filesystem and still follows the existing CREATE/initial-access rules; it is not equivalent to a memfd.
++* **Registered execution context:** successful explicit io_uring personality registration delegates a ring-bound referenced complete credential/Authority context, not merely UID/GID. Local later confinement replaces the task's state without revoking that earlier capability. Requests resolve the ID, obtain their own reference, pass LSM adoption checks and execute ordinary filesystem checks under the selected principal. Default submission does not use an old personality implicitly. This is distinct from fixed-file import and object-bound FD clone; see [temporal semantics](temporal-semantics.md).
++* **Existing-description alias/import:** `dup*`, fork inheritance, `SCM_RIGHTS`, `pidfd_getfd()`, and io_uring fixed-file registration/update retain or acquire references to an existing `struct file`. They preserve that file's FD capability state; the importing process receives the source's existing bearer capability, not a fresh path grant. `pidfd_getfd()` additionally requires ptrace-style access and passes `security_file_receive()`.
++* **Object-bound derivation:** `F_CLONEFD_CAP` opens from a pinned source path with saved source opener credentials, intersecting requested rights with source rights. It creates an independent description, not an alias, but is not authorization to acquire an arbitrary pathname. Stored Landlock optional permissions must not be amplified; the clone-specific LSM guard enforces that source ceiling.
++* **Independent reopen:** procfs reopen and handle opens create new descriptions rather than aliases or source-rights-intersected derivations. `O_PATH` acquires an object/path reference without READ/WRITE data access; reopening it for data is a new open and is checked as such.
++* **Mapping:** a mapping is derived from an FD and is checked against its FD capabilities at mmap/mprotect. Later confinement or FD attenuation does not revoke an already-created mapping.
++* **Privileged event/control descriptors:** fanotify event FDs are freshly opened file descriptions. Their READ/WRITE ceiling is checked at event-FD creation; the independent privileged fanotify checks and ordinary file-open LSM/filesystem checks remain. PIDFD/nsfs objects are process/namespace control capabilities, not qualified regular-file data routes.
++* **Anonymous storage:** `memfd_create()` creates an unlinked shmem/tmpfs-backed regular inode without a pathname open; SysV shared memory creates an IPC object, not a pathname file. Runtime tests showed both can provide unscoped memory read/write while filesystem READ/WRITE are handled. This is outside the current path-authority verdict, not proof of complete process confinement. POSIX shared memory accessed through its pathname remains a separate VFS path case.
++
++Namespace removal is also not revocation:
++
++\[
++namespace\ removal \ne established\ capability\ revocation
++\]
++
++### 3.6 Multi-object operations require conjunction
++
++Cross-parent rename is not `DELETE + CREATE`. It is one semantic atomic operation requiring authority over both relevant exact parents:
++
++\[
++Rename(A,B) = Authority_{RENAME}(A) \land Authority_{RENAME}(B)
++\]
++
++Replacing a destination is part of rename; it does not imply standalone DELETE. `PR_CAPAUTH_RENAMEAT2` is limited to direct-child regular files and flags `0`. The ordinary `renameat2` VFS path separately carries parent context into `vfs_rename_internal()`, but directory and nonzero-flag cases were not runtime-qualified; do not promise them as supported semantics.
++
++### 3.7 LINK creates a name for an existing object
++
++Hard-link creation is distinct from instantiation, removal, relocation, and file-data access:
++
++\[
++CREATE \not\Rightarrow LINK,\quad LINK \not\Rightarrow READ/WRITE/DELETE/RENAME
++\]
++
++For currently mediated hard links, including `linkat(..., AT_EMPTY_PATH)`, the task needs `FS_LINK` on the **exact destination parent** when LINK is marked handled. The source is resolved through normal Linux pathname/FD rules and remains subject to normal source hard-link eligibility (`may_linkat()`, including `fs.protected_hardlinks`). There is no separate semantic source LINK scope and no READ/WRITE FD right is required merely to add the name. `AT_EMPTY_PATH` still retains Linux's open-credential / `CAP_DAC_READ_SEARCH` restriction.
++
++The resulting name does not grant fresh READ or WRITE access. Existing source FDs remain bearer capabilities. Directory hard links remain rejected by the VFS. This is bounded hard-link mediation, not authority over mkdir, symlink creation, rename, or all namespace publication mechanisms. Details and qualification limits are in [qualification-status.md](qualification-status.md).
++
++### 3.8 Independent restrictions remain effective
++
++Explicit semantic authority must not bypass LSM denials, read-only filesystems, immutable/append-only rules, idmap validity, device-cgroup checks, filesystem callbacks, or structural VFS restrictions. Positive authority is not a super-capability.
++
++### 3.9 Confinement is not all process authority
++
++A mandatory domain is an upper bound only for the operation classes actually wired and marked handled. It does not rewrite every open file description, mapping, ioctl, kernel object, or unmodeled syscall. A domain is not literally the complete authority of a task.
++
++## 4. Current source model (verified in this worktree)
++
++The recorded baseline is `e767a4ea70a3992c37ed604157d32f0dfbf9b1e3`; the tree remains a PoC with uncommitted implementation changes. Verify symbols before relying on this section after rebases or edits.
++
++### 4.1 Authority representation and credential lifecycle
++
++* `include/linux/authority.h`, `kernel/authority.c`: the internal Authority Core has class-local operation dispatch and immutable class state. The only production class registered today is `AUTH_CLASS_FILESYSTEM`; its existing right IDs (LINK is 7, test sentinel bit 80) and variable-length UAPI bitmap are unchanged.
++* `struct authority` stores refcounted immutable snapshots and a confinement flag. Each class owns its positive-right bitmap, handled-operation bitmap, and domain mode (`selective` or `sealed`). Filesystem scope roots hold `struct path` references; they are evaluated only by filesystem class operations. Credential preparation/duplication takes a reference (`kernel/cred.c`, `security/keys/process_keys.c`); replacement installs a cloned object. Destruction is deferred through workqueue cleanup because cred teardown can be RCU-context.
++* Adding a filesystem scope requires a directory path. `PR_CAPAUTH_ADD_FS_SCOPE` checks `CAP_SYS_ADMIN`; adding a scope is rejected once confined. Thus the intended same-user launcher model currently requires a privileged authority-construction/broker step; there is no general unprivileged scope-grant API. Scope/right drops clone and reduce state. `authority_is_subset()` is used to guard reductions. The low-level model does not yet expose a general broker/delegate API for authority objects.
++* `PR_CAPAUTH_NORMAL` clears unconfined PoC authority; `PR_CAPAUTH_SYSTEM` is privileged compatibility/regression scaffolding that installs a global filesystem DAC override bit (and the test sentinel). A caller with `CAP_SYS_ADMIN` can reacquire that PoC authority while unconfined, so the broad monotonic-authority principle is not enforced across privileged mode changes before confinement. Once confined, `AUTH_SYSTEM` is rejected and `authority_cred_clear()` deliberately refuses to erase the domain on credential-changing exec. This is not the intended fine-grained final authority model.
++* The class dispatcher is a small static internal registry, not a plugin framework. Class operation IDs are distinct internal concepts from positive rights; existing filesystem bitmap positions are translated to class-local filesystem operations without changing UAPI. `FS_DAC_OVERRIDE` is a positive legacy grant, not a handled operation. `TEST_RIGHT_80` remains a non-authorizing storage sentinel.
++* The request context is a tagged, borrowed, synchronous union. The filesystem evaluator consumes only its filesystem path context; future classes can add their own typed context and class-state clone/destroy hooks rather than treating a filesystem path as a universal scope. No process, anonymous-storage, IPC, or network class is implemented.
++
++### 4.2 Scope matching
++
++`authority_path_in_scope()` in `kernel/authority.c` requires the same mount and dentry ancestry. `authority_has_scoped_right()` switches DELETE, RENAME, and LINK to exact mount+dentry matching. Rights on one directory scope are stored together. Path/root references are pinned, so pathname spelling is not the stored authority.
++
++### 4.3 UAPI and confinement entry
++
++`include/uapi/linux/prctl.h` defines the experimental `PR_CAPAUTH` interface and `PR_CAPAUTH_CONFINE`; `kernel/sys.c` implements it. `F_GETFD_CAP`, `F_RESTRICTFD_CAP`, and `F_CLONEFD_CAP` are experimental `fcntl` commands in `include/uapi/linux/fcntl.h`.
++
++Current `PR_CAPAUTH_CONFINE` behavior verified in `kernel/sys.c`:
++
++* accepts version 1 and a variable-length handled bitmap; unknown set bits fail with `-EOPNOTSUPP`, while zero extension space is accepted;
++* rejects entry if the task is multithreaded (`thread_group_empty()` requirement), or already confined;
++* rejects legacy global `AUTH_FS_DAC_OVERRIDE` authority at entry;
++* currently permits only `CREATE_FILE`, `READ_FILE`, `WRITE_FILE`, `DELETE_FILE`, `RENAME`, and `LINK` to be marked handled; `TRAVERSE` and `DAC_OVERRIDE` cannot be selected as handled rights in this version;
++* commits a confined authority and sets `no_new_privs` on successful entry.
++
++Once confined, `AUTH_NORMAL` cannot clear the domain and `AUTH_SYSTEM` is rejected. Scope addition is unavailable; drop operations remain available. Credential-changing exec calls `authority_cred_clear()`, which is a no-op on a confined object. These mechanics do not prove that all authority is revoked: pre-established/imported FDs and out-of-model channels remain.
++
++### 4.4 Current filesystem rights and paths
++
++| Right | Intended meaning | Current integration / important boundary |
++|---|---|---|
++| `FS_DAC_OVERRIDE` | Legacy global generic-DAC positive grant. | Used in generic permission compatibility path; confinement entry rejects it. Not a fine-grained final policy. |
++| `FS_CREATE_FILE` | Create regular file under scoped parent. | `may_o_create()`, `vfs_tmpfile()`, and `dentry_create()` paths. Semantic CREATE can satisfy generic DAC denial at selected points; generic/context-free lower create helpers are a known composition concern. |
++| `FS_TRAVERSE` | Search within a scoped directory for bounded handle-first lookup. | Used in `may_lookup()` permission paths. It is **not markable as mandatory handled** by current `PR_CAPAUTH_CONFINE`; current source therefore does not support a complete mandatory traversal ceiling. Fast-path details also need care. |
++| `FS_READ_FILE` | Establish/read a regular-file read capability. | Existing regular-file opens use an operation-aware permission request and generic DAC compatibility provider; mandatory handled-open checks and created-file initial-right checks remain separate. Existing FDs remain. |
++| `FS_WRITE_FILE` | Establish/use regular-file write capability. | Existing regular-file opens use the same provider with WRITE context; `O_TRUNC` and path `truncate()` request WRITE. Path truncate uses the provider only on generic-permission filesystems. Creation cannot mint it. Existing/imported FDs remain. |
++| `FS_DELETE_FILE` | Remove a direct non-directory entry from exact parent. | `PR_CAPAUTH_UNLINKAT` is the bounded direct-child API; generic unbounded unlink behavior is not a blanket positive grant path. Directory removal is not modeled by this right. |
++| `FS_RENAME` | Atomic regular-file rename requiring both exact parents. | `PR_CAPAUTH_RENAMEAT2` supports direct children, regular files, flags `0`; the ordinary `renameat2` path has separate VFS integration, but directory and nonzero-flag behavior is unqualified. VFS structural/LSM restrictions remain. |
++| `FS_LINK` (ID 7) | Add an existing non-directory object under a destination parent. | `link()`/`linkat()` and `AT_EMPTY_PATH` flow through `filename_linkat()` to `vfs_link_path()`. When handled, authority is exact mount+dentry identity of the destination parent. Source lookup/FD and Linux `may_linkat()` eligibility remain separate. Context-free `vfs_link()` callers fail closed in a handled LINK domain. Directory and non-syscall callback filesystems remain bounded/unqualified. |
++
++The exact implementation is distributed in `fs/namei.c`, not centralized in a single policy hook. See [qualification-status.md](qualification-status.md) for per-operation evidence.
++
++### 4.5 Mandatory checks versus ordinary DAC
++
++`fs/namei.c:inode_permission_path()` first enforces handled semantic operation/access where supplied, applies superblock/immutable/unmapped-ID constraints, calls a filesystem `i_op->permission` or `generic_permission()`, and only allows a semantic grant to satisfy a generic `-EACCES`. LINK uses exact-parent context; filesystem-specific permission callbacks are not bypassed. Device-cgroup and LSM inode checks follow.
++
++For fresh opens of existing regular files, `may_open()` supplies a request containing the current subject credentials, pinned path/object, mount idmap, and READ/WRITE operation bits. The legacy provider reuses `do_inode_permission()` / `generic_permission()` and returns ALLOW, DENY, or NOT_APPLICABLE; it does not reproduce mode, ACL, ownership, or DAC-capability rules. Generic DAC ALLOW remains compatible by default. On generic `-EACCES`, a qualified explicit semantic scope can grant the corresponding unconfined operation; a confined handled right still requires its scope before the provider can allow it. O_RDWR composes READ and WRITE separately when the aggregate generic check denies. Path-based `truncate()` now requests WRITE through the same bounded path-aware decision; `ftruncate()` remains an established-FD operation. Managed-FD mmap checks enforce FD READ/WRITE rights, including removing shared `VM_MAYWRITE` when WRITE is absent so later `mprotect()` cannot upgrade it. The global PoC `AUTH_FS_DAC_OVERRIDE` remains in the generic permission implementation and is rejected at confinement entry.
++
++The provider boundary remains deliberately limited to existing regular-file open access and path-based `truncate()` on the generic-permission path. A filesystem `i_op->permission` callback is outside it and its result is not overridden. Managed-FD mmap is separately governed by FD capability bits, not legacy DAC. `ftruncate()`, existing-FD I/O, internal/context-free permission callers, callback filesystem policy, and other operation classes are not brought into a universal decision core. XFS `open_by_handle` is an exceptional privileged fresh-description path that bypasses `may_open()`; it checks the mandatory READ/WRITE semantic ceiling, but does not use the DAC provider (the ioctl retains its `CAP_SYS_ADMIN` gate). Fanotify event-FD creation is another exceptional fresh-description path; `fs/notify/fanotify/fanotify_user.c:create_fd()` now applies the handled regular-file READ/WRITE ceiling before `dentry_open_nonotify()`, while retaining the existing LSM/filesystem checks. PIDFD/namespace export opens are special object paths, not qualified regular-file data routes. Anonymous memfd and SysV shared-memory storage are not covered by path scopes and remain out of this filesystem-path verdict. Independent mount, superblock, immutable/append-only, filesystem, devcgroup, LSM, and VFS structural checks remain effective. The focused experiments and qualification limits are in [qualification-status.md](qualification-status.md) and [dac-architecture-audit.rst](../authority-prototype/dac-architecture-audit.rst).
++
++The Authority Core is a shared status/dispatch contract, not universal syscall mediation. Filesystem DAC composition and many independent VFS decisions remain distributed. See §4.7 for the exact three-state contract and its deliberately narrow coverage.
++
++### 4.6 File-description capabilities
++
++`fs/file_capability.c` supports regular inodes on `rootfs`, `ramfs`, and `tmpfs`, excluding `IS_ANON_FILE()`, `FMODE_PATH`, and `FMODE_BACKING`. `memfd_create()` uses a regular shmem/tmpfs inode that is not `IS_ANON_FILE()`, so `F_GETFD_CAP` reports READ|WRITE from its `f_mode`; runtime also confirmed unscoped memfd write and shared mapping while both filesystem data rights were handled. That anonymous-storage route is outside pathname authority and remains an explicit confinement limitation. Unmanaged FD rights are otherwise derived from `FMODE_READ/WRITE`. Restriction creates or atomically reduces a managed rights bitmap; clone rights are `source_rights & requested_rights`, then constrained by the newly opened file's mode.
++
++`F_CLONEFD_CAP` reopens from the pinned `source->f_path` (not a procfs pathname), creates a new file description/offset, and retains LSM inode/open checks. It rejects sources with `FASYNC` or file ownership state. Dup-family calls still share the same underlying file capability; clone is the independent derivation operation.
++
++Clone retains the source's `f_cred`, but allocates an independent LSM file blob:
++it does not copy the source's opaque security state. Open/post-open hooks run
++before a new `security_file_clone(source, clone)` hook, before fd publication.
++Landlock rejects derivations whose recomputed optional permissions would exceed
++the source's cached optional permissions. This preserves a source's stored
++TRUNCATE denial after a rename, without rebasing opener credentials or copying
++LSM blobs/audit state. Conservative rejection is permitted even if a weaker
++clone could theoretically be produced. Other LSMs retain their existing hooks;
++this is not a claim of general stacked-LSM qualification.
++
++A denied fresh pathname open is not evidence that using or deriving an already
++held FD must be denied. The source ceiling is evaluated for that derivation,
++not retroactively against its original source after a later independent
++reduction. Landlock intentionally retains open-time FD permissions
++across later confinement and descriptor transfer. The required clone invariant
++is no amplification of both Authority bits and applicable stored LSM rights,
++not retroactive pathname authorization. See [targeted Landlock audit](landlock-audit.md).
++
++Managed rights are checked in relevant read/write, truncate/fallocate, ioctl, and mmap paths (`fs/read_write.c`, `fs/open.c`, `fs/ioctl.c`, `mm/mmap.c`). This is not universal ioctl/operation classification, and pre-existing mappings are not revoked by later reduction. Unsupported file types return `-EOPNOTSUPP` for these PoC `fcntl` operations.
++
++### 4.7 Authority Core request contract
++
++A request carries a class ID, a class-local operation ID, and tagged synchronous context. Classification is explicit:
++
++| State | Core behavior | Caller obligation |
++|---|---|---|
++| **UNHANDLED** | Returns success with `AUTHORITY_UNHANDLED`; it does not grant authority or run a class evaluator. | Continue the legacy Linux path unchanged. |
++| **HANDLED+IMPLEMENTED** | Runs the registered class evaluator; the evaluator can allow or deny using its class-specific context and state. | Preserve ordinary VFS/DAC, filesystem, mount, and LSM checks that are independent ceilings. |
++| **HANDLED+UNIMPLEMENTED** | Returns `-EOPNOTSUPP` before legacy fallback. A sealed class also classifies unknown operation IDs this way. | Fail closed; do not reinterpret as an unhandled legacy request. |
++
++An unsealed/selective class only claims operations in its handled-operation bitmap. An absent class and an unselected operation are UNHANDLED, preserving the prototype's opt-in/legacy compatibility boundary. A class may instead seal its operation namespace; then every operation in that class is claimed, and operations without an implementation fail closed. Class mode and handled-operation state are immutable across ordinary authority reductions; rights/scopes can be removed, but no API clears handled bits or unseals a class. `authority_is_subset()` rejects a candidate reduction that would discard a previously sealed/handled policy.
++
++The filesystem class maps currently wired CREATE, TRAVERSE, READ, WRITE, DELETE, RENAME, and LINK operations to its existing path-scope evaluator. The UAPI still permits only the same six currently handled operations and does not expose class sealing or arbitrary class selection. A CONFIG_KUNIT-only synthetic class tests implemented, explicitly unimplemented, unknown sealed, and unhandled cases; it is not a userspace API or evidence that other classes are mediated. Future classes must explicitly register typed context and state lifecycle/evaluation semantics. Absence from the registry is not a blanket allow claim; it remains UNHANDLED by contract and therefore remains outside any domain that did not claim that class.
++
++The common filesystem request path adds a static class/operation dispatch and class-local handled-state lookup, with no allocation, lock, dynamic registration, or generic rights-to-filesystem fallback. The unhandled path returns to the existing VFS decision. No performance benchmark is claimed. Fresh authorization, derivation, import/delegation, and established bearer-capability use remain distinct transitions.
++
++## 5. Intended system relationship and non-goals
++
++The intended longer-term composition is:
++
++```text
++explicit semantic authority + legacy DAC compatibility
++                         ↓
++             operation-aware VFS decision
++                         AND
++                  LSM decision
++                         AND
++     filesystem / mount / structural validity
++```
++
++For normal unconfined applications, Unix DAC remains the default/compatibility policy. For a confined process, DAC and UID 0 must not grant a handled operation outside its explicit ceiling. Inside a scope, a semantic grant may permit an operation traditional DAC would deny, subject to independent layers.
++
++This does **not** aim to remove UID/GID, mode bits, ACLs, `chmod`/`chown`, or quotas; replace LSMs, Landlock, seccomp, namespaces, or cgroups; force every process into explicit authority; or claim containment of kernel compromise. Landlock is complementary: it validates monotonic self-restriction and semantic filesystem rules, but is primarily an additional deny layer rather than this prototype's positive-grant mechanism. This is a design comparison, not a claim that Landlock lacks useful alternatives for a given deployment.
++
++## 6. Broker and deployment model
++
++A broker may retain broader rights, deny a request, perform it itself, or pass a weaker derived FD. A destination LINK grant does not itself authorize arbitrary source objects: ordinary pathname/FD resolution and `may_linkat()` still apply. In particular, foreign-credential `SCM_RIGHTS` FDs do not automatically satisfy `AT_EMPTY_PATH`'s open-credential check; see the qualification ledger. For example:
++
++```text
++broker (authority A) -> agent (authority subset A) -> helper (further subset)
++```
++
++The agent does not become globally stronger when the broker acts. An AI worker compromised within delegated task authority should ideally expose that task authority, not the user's complete ambient authority. An eventual launcher might accept policy-like syntax (e.g. “read project; write project/src; create project/build”), but such strings are resolution inputs only: kernel scope identity remains a resolved object/mount path. No such shell syntax is committed UAPI.
++
++## 7. Stable non-goals / deliberate boundaries
++
++* No pathname-prefix security policy.
++* No assumption that every Unix permission bit maps to one global semantic right.
++* No composition of DELETE+CREATE into RENAME or CREATE into LINK.
++* No universal revocation of established FDs/mappings on path-scope reduction.
++* No generic “all ioctl means read/write” classification.
++* No claim that ordinary pathname visibility/traversal is completely confined.
++* No claim that all syscalls/filesystems are mediated.
++* No claim that the DAC-provider idea is ready for wholesale conversion.
+diff --git a/Documentation/authority/design-history.md b/Documentation/authority/design-history.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..435899a669b3cae5221e21b8ae4acdce4756a2d9
+--- /dev/null
++++ b/Documentation/authority/design-history.md
+@@ -0,0 +1,287 @@
++# Design history: filesystem authority and FD capabilities
++
++This is the decision record, not a claim that every historical choice remains fully implemented. **Historical** means an earlier model/test; **current** means checked against the worktree described in [architecture.md](architecture.md); **runtime-reported** means the former isolated-QEMU run reported it, but its `/tmp` logs/test sources were lost after reboot. For present evidence limits see [qualification-status.md](qualification-status.md).
++
++## 1. Starting thesis: identity is not authority
++
++The prototype began from dissatisfaction with treating a Unix identity as a broad bundle of recoverable filesystem access. The motivating case was Alice running a worker as Alice: the worker should be able to operate on project A without thereby recovering all DAC access to project B, private SSH keys, and documents. Ownership and UID/GID remain useful for accounting, audit, compatibility, and default policy; they should not force a process to retain operational authority.
++
++The early system exposed broad `AUTH_NORMAL` / `AUTH_SYSTEM` modes and a control interface. The first proof-of-concept proposition was that a task could keep ordinary UID/GID/fsuid/fsgid and zero Linux effective/permitted capabilities while a separate authority mechanism enabled selected filesystem access; created objects still had ordinary Unix ownership. This identity-separation result was historically QEMU-tested, but is not reproducible from the lost harnesses in the current checkout.
++
++`AUTH_SYSTEM` is still present in the current source as privileged PoC/compatibility scaffolding. It grants a global generic-DAC override, not a polished production policy. It is explicitly rejected as the final fine-grained model. **Current-source caveat:** an unconfined caller with `CAP_SYS_ADMIN` can reacquire this broad PoC authority after clearing it with `AUTH_NORMAL`; therefore the monotonic principle is not enforced across privileged pre-confinement transitions. Confinement rejects `AUTH_SYSTEM` and cannot be cleared through the PoC control path.
++
++## 2. Representation and scope evolution
++
++### Fixed mask versus extensible rights
++
++**Rejected:** hard-code semantic rights into a fixed 64-bit mask.
++
++**Chosen:** dynamically sized bitmaps in refcounted authority objects. The work intentionally used a right at bit 80 (`AUTH_FS_TEST_RIGHT_80`) to catch accidental `u64` assumptions. Current `kernel/authority.c` still has this sentinel and 81-bit bitmap width. UAPI requests are size/versioned variable-length bitmaps; unknown set bits fail closed and zero-filled extension space is accepted in the current confinement parser.
++
++The right identifiers are a small PoC filesystem vocabulary, not a general mature authority-class registry. Adding a bit above 64 proves representation extensibility only; it does not prove a sustainable UAPI policy taxonomy.
++
++### Path strings versus object-backed scope
++
++**Rejected:** persistent string-prefix rules such as `allow /workspace/*`.
++
++**Why:** renames, symlink traversal, `..`, replacement at an old spelling, mount aliases, and bind mounts make string ancestry unstable and ambiguous.
++
++**Chosen:** pin a resolved `struct path` and compare mount+dentry identity. Current `authority_path_in_scope()` uses same-mount dentry ancestry for most rights; DELETE and RENAME use exact parent identity. Historically tested behaviors included authority following rename of the scoped object, not transferring to a replacement at the old pathname, symlink spelling not defining the grant, and bind-mount aliases not automatically inheriting a mount-specific scope. Exact tests/logs are lost; see qualification status.
++
++This is not equivalent to Unix DAC's inode-oriented ownership model. It is an intentional capability-scope identity choice whose behavior through unusual filesystems and disconnected dentries remains a qualification topic.
++
++## 3. Semantic operation vocabulary
++
++### CREATE separated from directory WRITE
++
++A distinct `CREATE_FILE` right was introduced so object instantiation would not be a synonym for generic directory WRITE/DAC override. Historical tests checked that CREATE by itself did not imply reading/writing existing files, mkdir, deletion, or rename. The right is intended for regular-file creation paths and a parent directory scope.
++
++An early ambiguity was whether a successful `O_CREAT|O_WRONLY` open should be treated as “CREATE establishing its initial handle.” That resembles traditional Unix semantics and was initially left open. The later resolution is Model B: inside confinement, CREATE does not mint initial data rights. See §10.
++
++### TRAVERSE and handle-first lookup
++
++**Rejected:** let a semantic traverse grant transparently authorize arbitrary ancestor walk before the final object is known. That risks exposing unrelated sibling reachability while resolving absolute or ambient paths.
++
++**Chosen design direction:** bounded, handle-first resolution such as `openat2()` with `RESOLVE_BENEATH` or `RESOLVE_IN_ROOT`, using a directory FD and a constrained path. Historical synthetic tests covered valid traverse+operation combinations and rejected `..`, deep-`..`, symlink escapes, wrong-parent FDs, and mount aliases.
++
++**Current-source correction:** `FS_TRAVERSE` exists and is consulted in `may_lookup()` paths, but the current `PR_CAPAUTH_CONFINE` parser does not allow it to be marked mandatory/handled. Thus the intended bounded traversal design is not a current mandatory-confinement guarantee. Some lookup fast paths also deserve direct source/runtime requalification. Do not promote the historical intended semantics to a current full boundary.
++
++### READ and WRITE separated
++
++`READ_FILE` and `WRITE_FILE` were added as independent data establishment/access rights. The intended open mapping is:
++
++```text
++O_RDONLY -> READ
++O_WRONLY -> WRITE
++O_RDWR   -> READ + WRITE
++```
++
++Historical tests covered explicit access despite mode-000 DAC objects, rejection when the needed right/scope was absent, and independence of READ from WRITE, CREATE, truncate, append, namespace creation/removal, and rename. A writable descriptor established while scope is present remains a bearer capability after the path scope is dropped; this is intentional and led to the FD capability distinction below.
++
++### DELETE separated from WRITE
++
++**Rejected:** treat file-data WRITE as permission to unlink.
++
++**Reason:** unlink changes a name in a parent directory; it does not write file contents. A file's data scope should not authorize namespace removal.
++
++**Chosen:** `DELETE_FILE` is attached to the exact parent directory, not inherited from an ancestor scope. Historical qualification included wrong-parent denial, no implication from victim READ/WRITE or CREATE/RENAME, unlinking a symlink name without deleting its target, removing only one hardlink name, and existing FDs surviving unlink. `rmdir` is not modeled by the current regular-entry delete right. Current `PR_CAPAUTH_UNLINKAT` is a bounded direct-child, non-directory operation.
++
++### RENAME as a distinct multi-object operation
++
++**Rejected:** compose `DELETE(source) + CREATE(destination)` into rename.
++
++**Reason:** rename is atomic and has replacement/exchange/topology rules unlike a sequence of independent delete and create operations.
++
++**Chosen:** `FS_RENAME` is an independent right on both exact parent directories:
++
++\[
++Rename(A,B) = RENAME(A) \land RENAME(B)
++\]
++
++Historical tests covered source-parent-only denial, destination-parent-only denial, both-parent success, and that CREATE/DELETE/data rights did not substitute. Replacement of an existing destination remains part of atomic rename; existing FDs to the replaced inode continue to refer to it.
++
++**Current boundary:** `PR_CAPAUTH_RENAMEAT2` is direct-child, regular-file, two-dirfd and `flags == 0`. The ordinary `renameat2` path separately reaches `vfs_rename_internal()` with parent context; directory and nonzero-flag variants were not runtime-qualified and are not promised by the bounded PoC API. Independent sticky, immutable, mount, LSM, delegation, lease, and filesystem rules are expected to remain effective.
++
++## 4. File descriptors become explicit capabilities
++
++### Audit of established file semantics
++
++Source inspection showed that Linux often checks access when a file description is established, then later read/write/ftruncate/fallocate/mmap paths trust a combination of `f_mode`, file operations, and security hooks. `F_SETFL` cannot change `O_ACCMODE`. This makes an established `struct file` a bearer capability for some operations, but not blanket authority over metadata or namespace: chmod/chown/xattrs, ioctl, and link/unlink have distinct checks and semantics.
++
++**Lesson:** pathname authority and FD authority are different state. Requiring path scope on every later read would contradict established open-file semantics, while allowing arbitrary FD operations would mislabel all object authority as data access.
++
++### Restriction versus derivation; dup versus clone
++
++The PoC added `F_GETFD_CAP`, `F_RESTRICTFD_CAP`, and `F_CLONEFD_CAP`.
++
++* Restriction changes current capability rights to `old & requested`; there is no re-enable operation.
++* `dup`, `dup2`, `dup3`, and `F_DUPFD*` mean another reference to the same open file description. Rights attenuation is shared.
++* `F_CLONEFD_CAP` creates an independent file description from a pinned source path with rights intersected against source rights. It is not a pathname reopen through `/proc`; offsets subsequently diverge.
++
++The first implementation supports only regular non-anonymous files on `rootfs`, `ramfs`, and `tmpfs`. It refuses paths/backing/unsupported file objects; clone also rejects selected file-owner/async state. Generic ioctl semantics are not guessed: managed-FD ioctl handling is deliberately narrow/fail-closed.
++
++### SCM_RIGHTS and inherited descriptors
++
++An FD passed with `SCM_RIGHTS` is explicit delegation of that established capability. Passing an attenuated clone gives the recipient the weaker capability; passing the original gives the recipient the original authority. Fork/exec also inherit descriptors according to ordinary FD rules and close-on-exec state. Confinement cannot erase these safely without a separately designed revocation model.
++
++## 5. Additive authority failed as a sandbox
++
++The first semantic-authority design was additive:
++
++\[
++Allow = DAC \lor ExplicitAuthority
++\]
++
++It made selected positive grants possible, but did not prevent traditional DAC grants outside semantic scopes. A synthetic QEMU test used a UID-1000 worker with a narrow workspace scope and a separate UID-owned file. Ordinary write open of the outside file still succeeded. This was not a corner-case bypass; it invalidated the assumption that “no semantic right” meant “deny.”
++
++### `/proc/self/fd` was a symptom, not the root cause
++
++A read-only cloned FD correctly rejected `write(fd)`. Reopening `/proc/self/fd/N` with `O_WRONLY` could nevertheless obtain a fresh writable description when DAC independently permitted it.
++
++**Rejected:** special-case `/proc/self/fd` as the fix. The same authority could be recovered through another pathname, symlink, hard link, rename, or other independent grant source.
++
++**Lesson:** FD attenuation only attenuates derivation from that FD; it does not remove ambient authority the process holds elsewhere.
++
++## 6. Mandatory domains added
++
++The additive failure motivated opt-in irreversible confinement. For selected handled operations, explicit domain rights form a ceiling that ordinary DAC and root's DAC-bypass capabilities cannot exceed. Explicit scoped grants can still authorize selected operations that generic DAC denies, subject to independent LSM/filesystem/structural checks.
++
++This is not simply `DAC AND deny-only sandbox`: semantic authority is a positive grant source in addition to a mandatory ceiling. The source audit found the decision flow distributed through `fs/namei.c`, not one central policy hook.
++
++Current `PR_CAPAUTH_CONFINE` (checked in `kernel/sys.c`) requires a single-threaded caller, accepts only `CREATE_FILE`, `READ_FILE`, `WRITE_FILE`, `DELETE_FILE`, `RENAME`, and `LINK` in its handled mask, refuses the legacy global DAC override, commits the confined credential and sets `no_new_privs`. Scope addition and `AUTH_SYSTEM` are disallowed after confinement; reductions remain possible. Current `authority_cred_clear()` will not clear a confined object on privileged-exec credential transition. This is the current code shape, not proof that all channels are mediated.
++
++The process-domain ceiling does **not** revoke existing/imported file descriptions or mappings. It also does not currently make TRAVERSE, directory operations, metadata, ioctl, or all filesystems mandatory. LINK has since been added to the handled mask, but only the audited hard-link VFS paths are covered. “Irreversible” means the domain cannot be exited/widened through the implemented PoC control flow; it does not mean every task authority is represented in that domain.
++
++## DAC remains compatibility policy; a narrow provider experiment follows
++
++A later architectural fork asked whether the prototype should remove classic DAC or eagerly translate every DAC-granted object into an explicit capability set. Both directions were rejected.
++
++* **Do not remove UID/GID, inode owners, mode bits, ACLs, chmod/chown, umask, or quota/accounting.** Ownership remains useful and ordinary applications need compatibility/default policy. The target is to separate a confined process's effective authority from what its identity could otherwise recover.
++* **Do not eagerly enumerate DAC-accessible objects into capabilities.** chmod/chown, ACL edits, newly created files, mount changes, and idmapped mounts make a materialized list stale and unscalable. If DAC becomes a provider, evaluate current subject/object/operation context lazily.
++* **Do not translate `rwx` one-to-one into semantic rights.** For a directory, traditional `w+x` participates in create, unlink, rename, and link decisions. A provider must answer whether DAC authorizes this semantic operation, not merely inspect one global bit.
++* **Do not treat every positive grant mechanism as a deny layer.** DAC, DAC-bypass capabilities, semantic scopes, and imported FDs can turn an operation into allow. LSM denials, `EROFS`, and structural restrictions normally add denials. The former sources threaten a common upper-bound model if left ambient; the latter should remain independent.
++
++At that audit checkpoint, the source had an **Authority State Core** (rights, scopes, matching were relatively centralized) but no shared operation-state contract or universal **Authorization Decision Core** (VFS decisions remained distributed). It judged a generic Unix mode/ACL/DAC-capability provider **partially feasible** only if it receives operation/path/`mnt_idmap` context and does not bypass custom `i_op->permission`, mount, devcgroup, or LSM checks. A bounded regular-file READ/WRITE open provider was then qualified on synthetic QEMU fixtures. A later integration checkpoint extended path-based `truncate()` to the same bounded generic-permission decision, enforced managed-FD mmap ceilings through `mprotect()`, and source-reviewed alternate fresh-open routes. It found XFS `open_by_handle` bypasses `may_open()`; that privileged route now enforces the handled semantic ceiling, but does not use the generic DAC provider. Callback filesystems remain fail-closed and unqualified. The exact integration run passed 47 focused cases, but reconstructed CREATE/confinement/FD/DELETE/RENAME subsets are not the unavailable complete historical suites. Verdict remains deliberately narrow: generic-permission regular-file opens and path truncate only; no universal decision service or provider extension. The later minimal request-classification core is described in §13 and does not broaden this provider verdict. See [dac-architecture-audit.rst](../authority-prototype/dac-architecture-audit.rst) and [qualification status](qualification-status.md).
++
++A vocabulary-ordering consequence follows: the known hard-link publication ambiguity is now specified and boundedly qualified, but mkdir/rmdir, symlink creation, metadata mutation, context-free filesystem callers, and other namespace operations remain outside this LINK right. Resolve any operation that the future provider would classify before centralizing an incomplete semantic vocabulary.
++
++### Capability-establishment follow-up
++
++The later source/runtime audit separated fresh descriptions from references to existing file objects. Same-UID `pidfd_getfd()` imports the target's existing file reference after ptrace-style permission checks; the receiver gets the source file's current bearer rights, not a new path authorization. By contrast, `/proc/<pid>/fd/N` reopening, `O_PATH` data reopen, generic handle-open, and XFS handle-open are fresh descriptions. Ordinary io_uring openat follows namei, while fixed-file registration/update preserves the same file object's monotone FD restrictions.
++
++Runtime falsification found that privileged fanotify event-FD creation bypassed `may_open()` and could deliver a readable regular-file FD after an ordinary READ open was denied. A narrow handled READ/WRITE ceiling was added to `fanotify_user.c:create_fd()`; the post-change isolated guest returned `-EACCES` in a `FAN_REPORT_FD_ERROR` event. This does not extend the generic DAC provider. Generic and XFS handle opens were runtime-tested on compatible XFS v5 fixtures; both retained missing-scope denials and scoped grants, with their distinct Linux privilege gates intact.
++
++`memfd_create()` and SysV shared memory were separately classified as anonymous/in-memory storage, not pathname filesystem authority. Runtime tests showed they can establish unscoped writable memory while filesystem READ/WRITE are handled; this remains an explicit boundary, not a new semantic right or claim of confinement. Any attempt to govern these routes needs a separate decision about anonymous storage semantics. See [qualification status](qualification-status.md) for bounded evidence and non-goals.
++
++## 7. Historical CVE/security evaluation changed the claim
++
++A source/advisory review compared selected historical vulnerabilities with the additive model. No vulnerable kernel or historical exploit was run; the evaluation used records/advisories/upstream fixes and synthetic fixtures. Its key architectural lesson was not “the prototype prevents CVEs,” but that unmodified software can continue using authority paths the prototype does not intercept.
++
++The retained historical classifications, supplied in the surviving design record but not revalidated here against the lost report, included:
++
++* `CVE-2021-41773` Apache traversal — **UNAFFECTED as shipped**; a bounded reconstruction could reject escape, but ordinary Apache was not forced through it.
++* `CVE-2023-22809` sudoedit, `CVE-2021-3156` sudo, `CVE-2021-4034` PwnKit, and `CVE-2019-5736` runc — **UNAFFECTED** by the additive filesystem prototype.
++* `CVE-2022-0847` Dirty Pipe and `CVE-2016-5195` Dirty COW — **UNAFFECTED / data-integrity gap** at the authority layer.
++* `CVE-2022-0185` filesystem-context kernel memory corruption and `CVE-2021-22555` netfilter kernel memory corruption — **OUT_OF_MODEL** (kernel compromise is outside the authority abstraction).
++* `CVE-2018-1002105` Kubernetes API authorization — **OUT_OF_MODEL** for this filesystem-authority scope.
++
++These are retained approximate labels, not independently evidence-checked claims in this reconstruction. Original IDs/evidence files were lost; see [historical-cve-review.rst](../authority-prototype/historical-cve-review.rst). Definitions matter: PREVENTED means the relevant primitive is unavailable; CONTAINED means a bug can trigger but delegated impact is bounded; UNAFFECTED means the relevant original path is not stopped; OUT_OF_MODEL means the trust boundary is outside this mechanism.
++
++The historical evaluation and `/proc` result caused the architecture to evolve:
++
++```text
++positive semantic grants
++  -> DAC access outside scopes observed
++  -> FD reopen recovery observed
++  -> additive model rejected as confinement
++  -> mandatory domains for selected operations
++```
++
++## 8. Creation can mint a capability: another changed assumption
++
++The later DAC audit traced `FMODE_CREATED`: Linux suppresses the normal open access check for a file just instantiated by that open; the new `struct file` still has the requested access mode, and subsequent I/O trusts the description. This raised the explicit question: may CREATE implicitly mint READ/WRITE?
++
++**Candidate A:** CREATE includes the initial O_RDONLY/O_WRONLY/O_RDWR description, close to ordinary Unix behavior.
++
++**Chosen candidate B for confined domains:** CREATE authorizes instantiation only; independent READ/WRITE scope must authorize initial FD mode. A post-create denial was rejected because it could leave an unauthorized object or descriptor behind. The check is before instantiation in `may_o_create()`; `O_TMPFILE` receives separate handling in `vfs_tmpfile()`; `dentry_create()` routes are source-adjusted too. Unconfined behavior remains ordinary Linux behavior.
++
++A later isolated guest matrix reported zero failures across named open APIs, O_TMPFILE, scope combinations, FD-cap rights and existing-file `O_TRUNC`. Exact logs/harness were in `/tmp` and are gone. The detailed recovered note is [create-file-authority.rst](../authority-prototype/create-file-authority.rst).
++
++## 9. O_TMPFILE revealed CREATE is not LINK
++
++The creation/data rule did not authorize namespace publication. The retained historical QEMU result observed successful `linkat(..., AT_EMPTY_PATH)` publication of an O_TMPFILE into a different parent outside CREATE scope; fresh write-open there was still denied by WRITE confinement. At that time this demonstrated:
++
++```text
++object instantiation != namespace insertion
++```
++
++This phase adds the bounded `FS_LINK` right (ID 7) and makes it selectable as handled. The exact historical bypass succeeds when LINK is not selected as handled, as expected for an unhandled VFS operation; with LINK handled, publication without the exact destination-parent scope now returns `EACCES`. This closes the tested namespace-insertion gap at the semantic authorization layer, not through an O_TMPFILE-specific prohibition.
++
++### Candidate source/destination models
++
++* **A — destination only, source is mere reachability:** simple and naturally handles `AT_EMPTY_PATH`, but too imprecise as a whole policy statement: source selectors and legacy source-eligibility rules still matter. Destination authority alone is not sufficient to invoke the syscall.
++* **B — explicit LINK on source object and destination parent:** expresses “permission to expose” plus “permission to mutate namespace,” but requires an object-scope representation for regular files and anonymous tmpfiles, new source authorization semantics, and a ruleset for pathname versus FD sources. The VFS already has distinct source lookup/FD and protected-hardlink checks; adding another source right was not justified by this qualification.
++* **C — exact destination LINK plus normal source resolution/eligibility:** **selected.** LINK controls the namespace mutation. For pathname sources Linux lookup plus `may_linkat()` remains authoritative; for `AT_EMPTY_PATH`, an established FD supplies the object selector subject to the ordinary open-credential / `CAP_DAC_READ_SEARCH` guard and `may_linkat()`. No READ/WRITE capability bit or separate semantic source scope is required to make the new name.
++* **D — separate `PUBLISH_OBJECT(source)` and `LINK_INTO(parent)`:** deferred. It may be warranted if future policy needs per-object exposure authority beyond normal Linux hard-link eligibility, but it is not the minimum model supported by current evidence.
++
++The selected model is destination-parent authority **and** a valid Linux source route, not destination-only permission in isolation. `FS_LINK` does not bypass protected-hardlink ownership/safety, source path reachability, FD credential restrictions, filesystem checks, or LSM policy.
++
++### Exact scope and operation semantics
++
++`FS_LINK` is an exact `(mount,dentry)` destination-parent right, parallel to the namespace scope identity already used by DELETE/RENAME. It follows the pinned parent object after rename, does not transfer to a replacement at the prior pathname, and does not cross a bind-mount alias. It does not compose with CREATE, DELETE, RENAME, READ, or WRITE. The VFS still rejects directory hard links and existing destination names; link count and filesystem behavior remain independent.
++
++`filename_linkat()` carries the resolved destination parent into `vfs_link_path()`. The existing context-free `vfs_link()` entry point fails closed when the current domain marks LINK handled, because it cannot prove destination mount+dentry identity. This intentionally makes kernel callers without operation-path context unable to link in such a domain; those callback/filesystem paths remain unqualified.
++
++Source-side details matter:
++
++* `link()` and pathname `linkat()` resolve the source through ordinary lookup; `AT_SYMLINK_FOLLOW` selects the followed target, while the default links the symlink object itself.
++* `AT_EMPTY_PATH` uses the file's pinned path, but Linux rejects a foreign `f_cred` unless the caller has `CAP_DAC_READ_SEARCH` in that credential's user namespace. `SCM_RIGHTS` transfers the FD but does not erase that gate.
++* When `fs.protected_hardlinks` is enabled, `may_linkat()` still requires inode ownership/`CAP_FOWNER` or a safe regular source (not setuid, not executable setgid, and generic READ|WRITE permitted). The semantic grant does not bypass this independent source policy.
++* Data-FD mode bits are not consulted by the LINK hook. Runtime tests linked using READ-only, WRITE-only, O_PATH, and zero-right cloned source FDs; same-credential SCM_RIGHTS transfer also worked. A foreign-credential broker FD failed `AT_EMPTY_PATH` with `ENOENT` as normal Linux policy requires.
++
++Thus a worker with destination LINK authority can publish a source FD without READ/WRITE data authority **when ordinary Linux source eligibility permits it and the open-credential gate is satisfied**. A separately credentialed broker's anonymous tmpfile FD cannot generally be published by an unprivileged receiver via `AT_EMPTY_PATH` in this PoC; the broker must act or another explicitly valid Linux source route must exist. No special-case bypass of that kernel restriction was introduced.
++
++### Runtime-reported bounded result
++
++The new isolated QEMU suite exercised ordinary and `AT_EMPTY_PATH` links, missing/wrong/ancestor scopes, renamed and replacement parents, bind alias, DAC denial positive grant, root `CAP_DAC_OVERRIDE`, CREATE/DELETE/RENAME separation, fresh READ/WRITE denial, symlink follow modes, protected-hardlink denial, O_TMPFILE publication, zero-right clone/dup/SCM_RIGHTS source FDs, and broker credential-gate behavior. It also checked EEXIST, directory-link rejection, EXDEV, and EROFS. The final reported counter was `LINK_TEST_FAILURES=0`. This remains bounded to the exact image and fixture in `/tmp/authority-link`; ACL/idmap, enforcing LSM, races, and callback filesystems remain unqualified.
++
++## 10. Current design forks and decisions
++
++| Question | Rejected alternative | Current choice / evidence | Remaining consequence |
++|---|---|---|---|
++| Rights representation | Fixed 64-bit mask | Variable bitmap; right 80 sentinel | PoC class taxonomy remains narrow. |
++| Scope identity | String-prefix path policy | Pinned path, mount+dentry matching | Mount aliases/disconnected paths need more testing. |
++| Traversal | Ambient arbitrary ancestor walk | Bounded handle-first lookup as design direction | Current confine ABI cannot mark TRAVERSE mandatory. |
++| Data write vs unlink | WRITE implies DELETE | Separate rights; parent namespace is target | Directory removal and broader unlink paths remain out. |
++| Rename | DELETE + CREATE compose | Atomic distinct RENAME; both parents | Regular files, flags zero only qualified. |
++| `dup` attenuation | Treat dup as child attenuation | Dup shares open description; clone derives | Existing aliases share later restriction. |
++| Reduced right | Keep hidden re-enable ceiling | No local re-enable from weaker capability | External broker/delegation API is incomplete. |
++| `/proc` reopen | Special-case procfs | Mediate every fresh authority establishment | Unhandled opens/link/import paths remain. |
++| Additive grants | Call additive model a sandbox | Optional mandatory domain for wired rights | Not complete mediation. |
++| DAC future | Remove Unix DAC | Retain compatibility/default DAC; test a narrow provider boundary | Existing regular-file READ/WRITE opens now have a bounded provider experiment; broader VFS integration remains unqualified. |
++| DAC precomputation | Enumerate every DAC-accessible inode as caps | Lazy generic provider from current subject/object/op for existing regular-file READ/WRITE opens | Wider operation and filesystem coverage remains unproven. |
++| CREATE output | CREATE supplies initial data handle | Confined CREATE does not mint READ/WRITE | All capability-producing operations need similar review. |
++| Hard-link publication | CREATE or data rights imply a new name | Exact destination LINK plus normal source route/eligibility | Foreign-credential `AT_EMPTY_PATH` remains subject to Linux `f_cred` gate; other namespace operations remain open. |
++
++## 11. Chronological milestone record
++
++| Milestone | Question and result | Changed assumption / invariant |
++|---|---|---|
++| 1. Broad `AUTH_NORMAL` / `AUTH_SYSTEM` proof | Can UID/GID remain ordinary while a separate authority mechanism authorizes selected filesystem access? Historical QEMU proof reported yes. | Identity is not operational authority. Broad SYSTEM mode is scaffolding only. |
++| 2. Variable-width authority object | Can new rights be added without 64-bit assumptions? Bit-80 test sentinel exercised dynamic bitmap storage. | Avoid fixed semantic mask; use refcounted authority state. |
++| 3. Object-backed scopes | Can authority follow an object rather than a string spelling? Historical rename/replacement/symlink/bind tests supported mount+dentry identity. | No string-prefix security identity. |
++| 4. CREATE | Can creation be separated from data, deletion, and directory operations? Initial tests treated it independently; initial output-FD semantics remained ambiguous. | Creation is its own namespace operation. |
++| 5. Bounded TRAVERSE | Can lookup rights be used without broad arbitrary ancestor reachability? Handle-first bounded lookup chosen. | Operation confinement is distinct from complete visibility confinement. |
++| 6. READ | Can an explicit scope establish read access despite DAC denial? Historical bounded open tests reported yes; traversal alone was insufficient. | Data observation is a separate right. |
++| 7. WRITE | Can writes, truncate, append, and access modes be separated from READ? Historical mode matrix supported independent rights. | O_RDWR requires both; established FD survives path reduction. |
++| 8. FD source audit | Which operations actually trust an established `struct file`? VFS audit found data/size operations differ from metadata/namespace. | File description is a bearer capability but not full object authority. |
++| 9. FD attenuation/derivation | Can a capability only lose rights? Restriction/clone intersections and dup semantics were added. | Dup shares; clone creates weaker independent description. |
++| 10. DELETE | Does data WRITE imply unlink? No; exact parent namespace right chosen. | Namespace removal is distinct; existing FD not revoked. |
++| 11. RENAME | Does delete+create authorize atomic move? No; both exact parents need RENAME. | Multi-target conjunction and operation identity. |
++| 12. Historical CVE review | Does additive prototype protect unmodified applications from old bug classes? Mostly not; source-level coverage did not imply reachability control. | No CVE-prevention claims; use tests to find model boundaries. |
++| 13. Ambient DAC and proc reopen | Could a narrow scoped task use UID DAC outside scope, then regain WRITE through proc reopen? Yes. | Additive authority is not confinement; procfs was a symptom. |
++| 14. Mandatory domains | Can selected semantic rights become irreversible ceilings? Opt-in confinement added for wired operation classes. | DAC/root cannot exceed handled rights; old FDs remain capabilities. |
++| 15. DAC architecture audit | Can generic Unix DAC become a compatibility provider? Partially feasible with op/path/idmap context and callbacks separate. | Do not begin with wholesale provider replacement. |
++| 16. CREATE minting audit | Does `FMODE_CREATED` allow CREATE to mint data FD rights? Source audit said yes absent a pre-create check. | Chose CREATE-not-data in confined domains. |
++| 17. O_TMPFILE publication gap | Does CREATE control linking an already-created anonymous object? Historical runtime observation said no. | CREATE and namespace insertion are distinct. |
++| 18. LINK semantic decision | What controls publication of an existing object? Exact destination-parent LINK plus normal source resolution and hard-link eligibility. | Add ID 7; keep data and namespace authority separate. |
++| 19. LINK qualification | Does the new handled right close the tested `AT_EMPTY_PATH` gap without overriding VFS policy? Bounded QEMU matrix reported zero failures. | The tested gap is mediated when LINK is handled; foreign-credential FD delegation remains constrained by Linux. |
++| 20. Current sequencing | What next before DAC refactor? Close/decide remaining semantic gaps and preserve LINK boundaries, then consider only the small no-behavior-change DAC boundary. | Vocabulary completeness precedes centralizing an incomplete policy. |
++| 21. READ/WRITE DAC-provider experiment | Can ordinary Unix DAC remain the default/compatibility source while qualified semantic READ/WRITE grants override generic DAC denial, without allowing DAC to exceed handled rights? A regular-file open provider was implemented and exercised in isolated QEMU; the focused suite passed. | Reuse `do_inode_permission()` / `generic_permission()` rather than duplicate DAC; keep callbacks and independent restrictions outside; do not expand beyond existing regular-file READ/WRITE yet. |
++| 22. Minimal Authority Core | Can class and operation classification distinguish unhandled legacy behavior from a claimed but missing implementation? A small internal dispatcher and CONFIG_KUNIT synthetic class exercise all three states. | Make unhandled an explicit legacy-continuation result; fail `-EOPNOTSUPP` for handled-but-unimplemented; do not claim universal mediation. |
++
++## 12. Future RFC framing (not an RFC)
++
++A credible future discussion should not claim “replace Unix permissions,” “replace Landlock/LSMs,” or “new complete Linux security model.” A narrower thesis is:
++
++> Separate ownership/identity from per-process operational filesystem authority while retaining Unix DAC as compatibility/default policy.
++
++Expect questions about why not Landlock, an LSM, or Linux capabilities; why positive grants may override generic DAC; why VFS integration is needed; how arbitrary filesystems behave; what the UAPI guarantees; concrete launcher/broker use cases; and the size of the trusted computing base. The current answer is exploratory: Landlock validates monotonic restriction and semantic rules but is primarily deny-oriented; LSMs remain independent deny/policy layers; DAC remains legacy/default; the prototype explores positive scoped delegation plus a mandatory ceiling. None is claimed to obsolete the others.
++
++## 13. Minimal Authority Core follow-up
++
++The earlier source model had shared authority storage but no common operation-state contract. This follow-up adds an internal request containing a class ID, class-local operation ID, and tagged synchronous context. Each class owns its handled-operation bitmap and domain mode. Selective mode claims only set operations; sealed mode claims every operation in that class. The dispatcher returns exactly three classification states: UNHANDLED, HANDLED+IMPLEMENTED, and HANDLED+UNIMPLEMENTED. UNHANDLED explicitly returns to the caller's legacy Linux path; HANDLED+UNIMPLEMENTED returns `-EOPNOTSUPP` before fallback; implemented requests run the class evaluator. Authorization allow/deny is a subsequent decision, not a fourth classification state.
++
++The existing filesystem UAPI and semantic behavior are retained. Its handled bitmap positions keep their existing numeric meaning; internal filesystem operation IDs map those positions, but `FS_DAC_OVERRIDE` remains a grant rather than an operation. The production filesystem class is selective, and the current UAPI still permits only the previously supported handled operations. No sealing control or new class ABI is added. A CONFIG_KUNIT-only synthetic class tests implemented, explicitly unimplemented, unknown sealed, and unhandled cases, monotonic seal retention, credential-reference inheritance, and confinement-clear behavior. This tests dispatch/lifecycle rules; it does not expose or mediate future classes to userspace.
++
++Filesystem scopes remain path-specific and are evaluated by filesystem-owned code. The request is a tagged union so a later class can add its own typed context and state lifecycle/evaluator hooks rather than treating `struct path` as universal. No process, anonymous-storage, IPC, or network authority is introduced. An absent class is UNHANDLED for compatibility and remains outside domains that did not claim it; the Core is not complete mediation. Exact-source QEMU evidence and limits are in [qualification status](qualification-status.md).
+diff --git a/Documentation/authority/index.rst b/Documentation/authority/index.rst
+new file mode 100644
+index 0000000000000000000000000000000000000000..7312048b46d212255e5693c253c7ce420e0f7f6b
+--- /dev/null
++++ b/Documentation/authority/index.rst
+@@ -0,0 +1,23 @@
++Experimental filesystem authority prototype
++============================================
++
++These documents describe an unmerged PoC in this source tree. They are
++engineering memory, not normative kernel API documentation or a complete
++security claim. The architecture, history, and qualification ledger are kept
++separate so that design intent cannot be mistaken for test evidence.
++
++The Markdown source files are available for download:
++
++* :download:`Frozen experimental v1 baseline <FILESYSTEM-V1-BASELINE.md>`
++* :download:`Next development phase (planning only) <NEXT-PHASE.md>`
++* :download:`Future mandatory regression requirements <FUTURE-REGRESSION.md>`
++* :download:`Architecture and invariants <architecture.md>`
++* :download:`Temporal capability and execution-context semantics <temporal-semantics.md>`
++* :download:`Design history and rejected forks <design-history.md>`
++* :download:`Qualification status and next work <qualification-status.md>`
++* :download:`Filesystem v1 operation and invariant matrix <filesystem-v1-matrix.md>`
++* :download:`Targeted Landlock and FD derivation audit <landlock-audit.md>`
++
++Detailed recovered reports from the prior qualification are in
++``Documentation/authority-prototype/``. The original reports/logs under
++``/tmp`` were lost after reboot; see their recovery notes for evidence limits.
+diff --git a/Documentation/index.rst b/Documentation/index.rst
+index a9eba8187de6df9b4eaba349cb2ac6e6c9041878..83195bcad0f04d3faf0e3e17087e8c11a828e4e7 100644
+--- a/Documentation/index.rst
++++ b/Documentation/index.rst
+@@ -120,6 +120,7 @@ to reStructuredText format, or are simply too old.
+    :caption: Other documentation
+ 
+    Unsorted documentation <staging/index>
++   Experimental filesystem authority prototype <authority/index>
+ 
+ 
+ Translations

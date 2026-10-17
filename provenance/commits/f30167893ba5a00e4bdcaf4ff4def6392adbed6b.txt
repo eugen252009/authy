@@ -1,0 +1,15 @@
+tree da9e8d4a7ae55dbd8bfc329852f92e35d21a7013
+parent 81dc7bbeb81556582c69406024dfad9691700346
+author Eugen <eugen252009@gmail.com> 1792225369 +0200
+committer Eugen <eugen252009@gmail.com> 1792225369 +0200
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ iHUEABYKAB0WIQSvDGBPSGcm39TS7zfViIyBtkfWSAUCatMwWQAKCRDViIyBtkfW
+ SDOeAP9aKWggHiCAUuzPhd/J871LCK1YNQ2/foWdVFWKHmLTWgEAjQI0rVb8LFYj
+ ueI8f1zDK+YDmRBxJ1MZMZWy/JHwVwU=
+ =ANNC
+ -----END PGP SIGNATURE-----
+
+selftests: authority: exercise Landlock descriptor composition
+
+Record the qualified Landlock/FD composition and independent-denial regression source.

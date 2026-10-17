@@ -1,0 +1,9 @@
+64cc404d441f66ad1a43274c9c7c0675efdca977ec79297f92a8ed8749981801  0001-authority-add-immutable-core-state-and-credential-li.patch
+dc5ddabc26eb84a7f9f2f59445eded51f9681eec444c102a5cf24e5217ce6e91  0002-fs-add-attenuating-and-independently-cloned-file-cap.patch
+ed81d1d1390bb3c6a2a308b117be6800085d935e5e4c5c858a350a2e92a3bf04  0003-authority-enforce-scoped-filesystem-operations-throu.patch
+2a6f4882b0307347ad81a45605aa912ffd67ca4fae0bea395defdda90115e1e3  0004-selftests-authority-cover-filesystem-lifecycle-and-a.patch
+3a3d2b61c46315b03ff25181e5f3b92d3f878a322d539aa4cbf5b69548acb9c0  0005-selftests-authority-exercise-Landlock-descriptor-com.patch
+603c7a02aa12caf1084e53aa734562195f6e02cf21c9c39019789780162c7e54  0006-selftests-authority-qualify-temporal-delegation-and-.patch
+94b88ea018246448e6522dd20bcfaa20acb71df88270a71c942575cab18d06f5  0007-selftests-authority-register-suites-and-isolated-QEM.patch
+e054bb5fbeb0bbff65dffe90a747936e473f7ace3a324689b6d1d63e840418f1  0008-docs-authority-describe-architecture-and-prototype-p.patch
+ad97f33717c91b9fc2cd81bbf457fe691d4b89c941f97f588b138d25289d78a8  0009-docs-authority-record-experimental-v1-qualification-.patch

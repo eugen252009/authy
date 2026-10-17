@@ -1,0 +1,15 @@
+tree 836a9c1de80e454b980fc5d59366700e71be0202
+parent f30167893ba5a00e4bdcaf4ff4def6392adbed6b
+author Eugen <eugen252009@gmail.com> 1792225370 +0200
+committer Eugen <eugen252009@gmail.com> 1792225370 +0200
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ iHUEABYKAB0WIQSvDGBPSGcm39TS7zfViIyBtkfWSAUCatMwWgAKCRDViIyBtkfW
+ SKElAQChqS8OHqkhxUAooDO7724zRtX3EiHJXgMBL9M+ExASDwD6A+F3O6Bs1c1B
+ Ax8p4d3+q6GAuOzB02S5jRnk9NFqew0=
+ =BQ5R
+ -----END PGP SIGNATURE-----
+
+selftests: authority: qualify temporal delegation and snapshots
+
+Record temporal alias versus independent clone, reduction/delegation/inheritance and complete saved-credential personality tests with their interpretation. Preserve EXPECTED_VALID_DELEGATION and the absence of global revocation; no runtime qualification is rerun by committing.

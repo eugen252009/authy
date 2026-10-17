@@ -1,0 +1,15 @@
+tree 1a51cd5b579b7c890c41e6fdc563928f76cda4cd
+parent 935c956d484fe4c1af8e04f62ec6d3cbc8f80f3f
+author Eugen <eugen252009@gmail.com> 1792225371 +0200
+committer Eugen <eugen252009@gmail.com> 1792225371 +0200
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ iHUEABYKAB0WIQSvDGBPSGcm39TS7zfViIyBtkfWSAUCatMwWwAKCRDViIyBtkfW
+ SPGLAQDA+RBWx9+XDCGUI0sM538jpKkrj4o6CYtF/G/agtJqJwEAmQXLXudsj5KR
+ F3bD6G30eins02Xhi0oRkIM7v5j5HQA=
+ =dHgM
+ -----END PGP SIGNATURE-----
+
+selftests: authority: register suites and isolated QEMU runner
+
+Register all now-present suites, record configuration fragments and isolated QEMU packaging/execution instructions. Keep full qualification images/logs/evidence outside Git.

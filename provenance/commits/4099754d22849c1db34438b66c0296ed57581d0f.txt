@@ -1,0 +1,15 @@
+tree 7ca72c6015e57c522049abce0bab3b907ec6fd61
+parent c25016c12b05cb6458f96c7bbc09cc3d69d35ea7
+author Eugen <eugen252009@gmail.com> 1792225336 +0200
+committer Eugen <eugen252009@gmail.com> 1792225336 +0200
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ iHUEABYKAB0WIQSvDGBPSGcm39TS7zfViIyBtkfWSAUCatMwOAAKCRDViIyBtkfW
+ SCXPAQDVk3uGSVoeD3TaNmOoR+V58pkTZoYCwf7188trcFnyPwD/ZyaJMqqmoV6R
+ oQ9yJjfd0HhFuPKQA293SBUITigsKQg=
+ =78mu
+ -----END PGP SIGNATURE-----
+
+fs: add attenuating and independently cloned file capabilities
+
+Add regular-file bitmap query/restriction/clone operations and shared-description lifetime/use checks. Keep source-context and cached-LSM preservation hooks and enforcing implementations together with the clone operation so the series does not advertise an unguarded derivation. Include the adjacent vfs_link_path declaration from the same existing fs.h change; its implementation follows next.

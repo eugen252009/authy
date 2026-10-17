@@ -1,0 +1,15 @@
+tree 7fa351dedd010e448ba7b7a12e69789cc7556e93
+parent dd6c9f14df1034e5e2d92459e34a75a132f0ddd6
+author Eugen <eugen252009@gmail.com> 1792225373 +0200
+committer Eugen <eugen252009@gmail.com> 1792225373 +0200
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ iHUEABYKAB0WIQSvDGBPSGcm39TS7zfViIyBtkfWSAUCatMwXQAKCRDViIyBtkfW
+ SBI1AQDF/lO6PrVvevPjZnyPwITKUu6UIzVPtjxHSVQ9sCNi5wD+JSgg1D0fX5Wq
+ znGRW0UOqRUNJdoptUTOD93oo9qslws=
+ =gH+1
+ -----END PGP SIGNATURE-----
+
+docs: authority: record experimental v1 qualification and roadmap
+
+Record the CONDITIONAL GO experimental baseline, chronological evidence/accepted limitations and permanent A_out subset invariant. Publish planning-only future-class/regression requirements, not new capabilities or archived runtime artifacts. Preserve qualified documentation bytes, including existing Markdown hard-break spaces or blank lines at EOF; no source formatting or runtime behavior is changed.

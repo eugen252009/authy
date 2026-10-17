@@ -1,0 +1,15 @@
+tree de2d2d40086cf781287040b72bfd30e81bd9a4ee
+parent e767a4ea70a3992c37ed604157d32f0dfbf9b1e3
+author Eugen <eugen252009@gmail.com> 1792225317 +0200
+committer Eugen <eugen252009@gmail.com> 1792225317 +0200
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ iHUEABYKAB0WIQSvDGBPSGcm39TS7zfViIyBtkfWSAUCatMwJQAKCRDViIyBtkfW
+ SL3/AP9qdSxtJYJSF8UzwPvgSy6CTfo7zB4U1/mNuDokXXzebgD8D7iN3AZCqnPP
+ JGIrZGuSEjNACHiJ6LNrRjumeJ6jDgw=
+ =g6Mk
+ -----END PGP SIGNATURE-----
+
+authority: add immutable core state and credential lifecycle
+
+Introduce immutable class-dispatched Authority state and filesystem scope evaluation, credential reference ownership and exec transitions. Keep the embedded synthetic KUnit class/tests with their private implementation rather than manufacturing a split. Wire Core through existing unconditional Kbuild integration. No public constructor is exposed until the pathname integration commit.

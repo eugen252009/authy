@@ -1,0 +1,9 @@
+0001-authority-add-immutable-core-state-and-credential-li.patch
+0002-fs-add-attenuating-and-independently-cloned-file-cap.patch
+0003-authority-enforce-scoped-filesystem-operations-throu.patch
+0004-selftests-authority-cover-filesystem-lifecycle-and-a.patch
+0005-selftests-authority-exercise-Landlock-descriptor-com.patch
+0006-selftests-authority-qualify-temporal-delegation-and-.patch
+0007-selftests-authority-register-suites-and-isolated-QEM.patch
+0008-docs-authority-describe-architecture-and-prototype-p.patch
+0009-docs-authority-record-experimental-v1-qualification-.patch

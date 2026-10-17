@@ -1,0 +1,1715 @@
+From f8bc183c13ef36cee7f0c5736af269d61375e7ae Mon Sep 17 00:00:00 2001
+From: Eugen <eugen252009@gmail.com>
+Date: Sat, 17 Oct 2026 10:22:47 +0200
+Subject: [PATCH 3/9] authority: enforce scoped filesystem operations through
+ VFS
+
+Expose the existing versioned experimental prctl constructor/reduction operations and implement scoped DAC/path, data/namespace checks and truncate/open/handle/fanotify establishment guards. These depend on Core and file-capability helpers from the preceding commits. Preserve existing semantics and native/LSM checks without a new Kconfig switch. This commit also completes the existing ftruncate/fallocate bearer guards alongside path-open/truncate integration. Intermediate series states are not independently qualified.
+---
+ fs/namei.c                         | 799 ++++++++++++++++++++++++++---
+ fs/notify/fanotify/fanotify_user.c |  20 +
+ fs/open.c                          |  10 +-
+ fs/xfs/xfs_handle.c                |  19 +
+ include/linux/namei.h              |   9 +
+ include/uapi/linux/prctl.h         |  57 ++
+ kernel/sys.c                       | 304 +++++++++++
+ 7 files changed, 1145 insertions(+), 73 deletions(-)
+
+diff --git a/fs/namei.c b/fs/namei.c
+index 20a6534ea3efffd6686e3b49c3e76f399c966f9e..33ba78cbeaf3f6fdf1294db534acbd81f1816d01 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -31,6 +31,8 @@
+ #include <linux/mount.h>
+ #include <linux/audit.h>
+ #include <linux/capability.h>
++#include <linux/cred.h>
++#include <linux/authority.h>
+ #include <linux/file.h>
+ #include <linux/fcntl.h>
+ #include <linux/device_cgroup.h>
+@@ -530,6 +532,16 @@ int generic_permission(struct mnt_idmap *idmap, struct inode *inode,
+ 	if (ret != -EACCES)
+ 		return ret;
+ 
++	/* Legacy global grant; scoped rights need operation/path context. */
++	{
++		bool allowed;
++
++		if (!authority_has_right(current_cred()->authority,
++					 AUTH_CLASS_FILESYSTEM,
++					 AUTH_FS_DAC_OVERRIDE, &allowed) && allowed)
++			return 0;
++	}
++
+ 	if (S_ISDIR(inode->i_mode)) {
+ 		/* DACs are overridable for directories */
+ 		if (!(mask & MAY_WRITE))
+@@ -598,8 +610,9 @@ static inline int do_inode_permission(struct mnt_idmap *idmap,
+  *
+  * Separate out file-system wide checks from inode-specific permission checks.
+  *
+- * Note: lookup_inode_permission_may_exec() does not call here. If you add
+- * MAY_EXEC checks, adjust it.
++ * lookup_inode_permission_may_exec() only checks MAY_EXEC; this helper's
++ * superblock restrictions currently apply to MAY_WRITE. Keep them in sync if
++ * superblock-level execute checks are added.
+  */
+ static int sb_permission(struct super_block *sb, struct inode *inode, int mask)
+ {
+@@ -613,44 +626,236 @@ static int sb_permission(struct super_block *sb, struct inode *inode, int mask)
+ 	return 0;
+ }
+ 
+-/**
+- * inode_permission - Check for access rights to a given inode
+- * @idmap:	idmap of the mount the inode was found from
+- * @inode:	Inode to check permission on
+- * @mask:	Right to check for (%MAY_READ, %MAY_WRITE, %MAY_EXEC)
+- *
+- * Check for read/write/execute permissions on an inode.  We use fs[ug]id for
+- * this, letting us set arbitrary permissions for filesystem access without
+- * changing the "normal" UIDs which are used for other things.
+- *
+- * When checking for MAY_APPEND, MAY_WRITE must also be set in @mask.
++/*
++ * A fresh regular-file READ/WRITE request is decided per semantic operation.
++ * The legacy provider is the existing generic_permission() implementation;
++ * this layer only combines its result with explicit scoped authority.
+  */
+-int inode_permission(struct mnt_idmap *idmap,
+-		     struct inode *inode, int mask)
++enum legacy_dac_provider_result {
++	LEGACY_DAC_PROVIDER_ALLOW,
++	LEGACY_DAC_PROVIDER_DENY,
++	LEGACY_DAC_PROVIDER_NOT_APPLICABLE,
++};
++
++struct fs_access_request {
++	const struct cred *subject;
++	struct inode *object;
++	const struct path *path;
++	struct mnt_idmap *idmap;
++	u32 operations;
++	int permission_mask;
++};
++
++static enum legacy_dac_provider_result
++legacy_dac_regular_file_provider(const struct fs_access_request *request,
++				 u32 operation, int *provider_error)
++{
++	int mask = request->permission_mask;
++
++	if (operation == AUTH_FS_ACCESS_READ ||
++	    operation == AUTH_FS_ACCESS_WRITE) {
++		mask &= ~(MAY_READ | MAY_WRITE);
++		mask |= operation == AUTH_FS_ACCESS_READ ? MAY_READ : MAY_WRITE;
++	} else if (operation) {
++		*provider_error = -EOPNOTSUPP;
++		return LEGACY_DAC_PROVIDER_NOT_APPLICABLE;
++	}
++
++	*provider_error = do_inode_permission(request->idmap, request->object,
++					      mask);
++	if (!*provider_error)
++		return LEGACY_DAC_PROVIDER_ALLOW;
++	if (*provider_error == -EACCES)
++		return LEGACY_DAC_PROVIDER_DENY;
++	return LEGACY_DAC_PROVIDER_NOT_APPLICABLE;
++}
++
++static int fs_access_decide_one(const struct fs_access_request *request,
++				u32 operation,
++				enum legacy_dac_provider_result legacy,
++				int provider_error)
++{
++	enum authority_fs_right right;
++	bool explicit_allow, mandatory;
++
++	right = operation == AUTH_FS_ACCESS_READ ? AUTH_FS_READ_FILE :
++		AUTH_FS_WRITE_FILE;
++	if (legacy == LEGACY_DAC_PROVIDER_NOT_APPLICABLE)
++		return provider_error;
++
++	explicit_allow = authority_allows_fs(request->subject, request->path,
++					     right);
++	mandatory = authority_fs_right_handled(request->subject, right);
++	if (mandatory)
++		return explicit_allow ? 0 : -EACCES;
++
++	/* Unconfined compatibility is legacy DAC OR explicit semantic scope. */
++	if (legacy == LEGACY_DAC_PROVIDER_ALLOW || explicit_allow)
++		return 0;
++	return -EACCES;
++}
++
++static bool fs_access_request_supported(const struct fs_access_request *request)
++{
++	int access_mask = 0;
++
++	if (request->operations & AUTH_FS_ACCESS_READ)
++		access_mask |= MAY_READ;
++	if (request->operations & AUTH_FS_ACCESS_WRITE)
++		access_mask |= MAY_WRITE;
++	if (!access_mask ||
++	    request->operations & ~(AUTH_FS_ACCESS_READ | AUTH_FS_ACCESS_WRITE) ||
++	    (request->permission_mask & (MAY_READ | MAY_WRITE)) != access_mask ||
++	    (request->permission_mask & (MAY_EXEC | MAY_NOT_BLOCK)))
++		return false;
++	return true;
++}
++
++static int fs_regular_file_access_decision(
++		const struct fs_access_request *request,
++		bool *generic_dac_denied)
++{
++	enum legacy_dac_provider_result legacy;
++	int provider_error, error;
++
++	/* Preserve the common fast path: one ordinary generic DAC evaluation. */
++	legacy = legacy_dac_regular_file_provider(request, 0, &provider_error);
++	if (legacy == LEGACY_DAC_PROVIDER_NOT_APPLICABLE)
++		return provider_error;
++	if (legacy == LEGACY_DAC_PROVIDER_ALLOW)
++		return 0;
++	if (generic_dac_denied)
++		*generic_dac_denied = true;
++
++	/*
++	 * Only a generic DAC denial needs per-operation composition. This lets
++	 * O_RDWR combine DAC for one operation with explicit authority for the
++	 * other without changing the ordinary aggregate-DAC success path.
++	 */
++	if (request->operations == AUTH_FS_ACCESS_READ)
++		return fs_access_decide_one(request, AUTH_FS_ACCESS_READ,
++					    legacy, provider_error);
++	if (request->operations == AUTH_FS_ACCESS_WRITE)
++		return fs_access_decide_one(request, AUTH_FS_ACCESS_WRITE,
++					    legacy, provider_error);
++
++	legacy = legacy_dac_regular_file_provider(request, AUTH_FS_ACCESS_READ,
++						  &provider_error);
++	error = fs_access_decide_one(request, AUTH_FS_ACCESS_READ, legacy,
++				     provider_error);
++	if (error)
++		return error;
++	legacy = legacy_dac_regular_file_provider(request, AUTH_FS_ACCESS_WRITE,
++						  &provider_error);
++	return fs_access_decide_one(request, AUTH_FS_ACCESS_WRITE, legacy,
++				    provider_error);
++}
++
++/*
++ * operation_right is supplied by operation-aware callers: may_o_create()
++ * for FS_CREATE_FILE, may_lookup() for FS_TRAVERSE, and the namespace
++ * mutation paths for DELETE_FILE, RENAME, or LINK. operation_access is a
++ * semantic READ_FILE/WRITE_FILE request with resolved object, path and idmap.
++ * The regular-file DAC provider is limited to this request; callbacks and
++ * other operation classes retain their existing permission path.
++ */
++int inode_permission_path(struct mnt_idmap *idmap,
++				 struct inode *inode, int mask,
++				 const struct path *path,
++				 enum authority_fs_right operation_right,
++				 u32 operation_access,
++				 bool *generic_dac_denied)
+ {
+ 	int retval;
++	bool regular_access_provider = false;
++
++	if (generic_dac_denied)
++		*generic_dac_denied = false;
++
++	/* Dispatch handled requests; UNHANDLED retains the legacy VFS path. */
++	if (path && operation_access) {
++		if (operation_access & AUTH_FS_ACCESS_READ) {
++			retval = authority_fs_operation_check(current_cred(), path,
++							     AUTH_FS_OP_READ_FILE);
++			if (retval)
++				return retval;
++		}
++		if (operation_access & AUTH_FS_ACCESS_WRITE) {
++			retval = authority_fs_operation_check(current_cred(), path,
++							     AUTH_FS_OP_WRITE_FILE);
++			if (retval)
++				return retval;
++		}
++	} else if (path) {
++		retval = authority_fs_operation_check(current_cred(), path,
++						     (enum authority_fs_operation)operation_right);
++		if (retval)
++			return retval;
++	}
+ 
+ 	retval = sb_permission(inode->i_sb, inode, mask);
+ 	if (unlikely(retval))
+ 		return retval;
+ 
+ 	if (mask & MAY_WRITE) {
+-		/*
+-		 * Nobody gets write access to an immutable file.
+-		 */
++		/* Nobody gets write access to an immutable file. */
+ 		if (unlikely(IS_IMMUTABLE(inode)))
+ 			return -EPERM;
+ 
+-		/*
+-		 * Updating mtime will likely cause i_uid and i_gid to be
+-		 * written back improperly if their true value is unknown
+-		 * to the vfs.
+-		 */
++		/* Preserve idmap-aware ownership validity before permission policy. */
+ 		if (unlikely(HAS_UNMAPPED_ID(idmap, inode)))
+ 			return -EACCES;
+ 	}
+ 
+-	retval = do_inode_permission(idmap, inode, mask);
++	if (path && operation_access && S_ISREG(inode->i_mode) &&
++	    !inode->i_op->permission) {
++		struct fs_access_request request = {
++			.subject = current_cred(),
++			.object = inode,
++			.path = path,
++			.idmap = idmap,
++			.operations = operation_access,
++			.permission_mask = mask,
++		};
++
++		if (fs_access_request_supported(&request)) {
++			regular_access_provider = true;
++			retval = fs_regular_file_access_decision(&request,
++								generic_dac_denied);
++		} else {
++			retval = do_inode_permission(idmap, inode, mask);
++		}
++	} else {
++		retval = do_inode_permission(idmap, inode, mask);
++	}
++
++	if (retval == -EACCES && !inode->i_op->permission &&
++	    generic_dac_denied)
++		*generic_dac_denied = true;
++	if (retval == -EACCES && path && !inode->i_op->permission &&
++	    !regular_access_provider) {
++		bool allowed;
++
++		if (operation_access)
++			allowed = authority_allows_fs_access(current_cred(), path,
++						     operation_access);
++		else if (operation_right == AUTH_FS_DELETE_FILE ||
++			 operation_right == AUTH_FS_RENAME ||
++			 operation_right == AUTH_FS_LINK)
++			allowed = authority_allows_fs_exact(current_cred(), path,
++						    operation_right);
++		else
++			allowed = authority_allows_fs(current_cred(), path,
++						      operation_right);
++
++		/* Keep scoped DAC override limited to its existing create path. */
++		if (!allowed && !operation_access &&
++		    operation_right == AUTH_FS_CREATE_FILE)
++			allowed = authority_allows_fs(current_cred(), path,
++						     AUTH_FS_DAC_OVERRIDE);
++		if (allowed)
++			retval = 0;
++	}
+ 	if (unlikely(retval))
+ 		return retval;
+ 
+@@ -660,6 +865,25 @@ int inode_permission(struct mnt_idmap *idmap,
+ 
+ 	return security_inode_permission(inode, mask);
+ }
++
++/**
++ * inode_permission - Check for access rights to a given inode
++ * @idmap:	idmap of the mount the inode was found from
++ * @inode:	Inode to check permission on
++ * @mask:	Right to check for (%MAY_READ, %MAY_WRITE, %MAY_EXEC)
++ *
++ * Check for read/write/execute permissions on an inode.  We use fs[ug]id for
++ * this, letting us set arbitrary permissions for filesystem access without
++ * changing the "normal" UIDs which are used for other things.
++ *
++ * When checking for MAY_APPEND, MAY_WRITE must also be set in @mask.
++ */
++int inode_permission(struct mnt_idmap *idmap,
++		     struct inode *inode, int mask)
++{
++	return inode_permission_path(idmap, inode, mask, NULL,
++				     AUTH_FS_DAC_OVERRIDE, 0, NULL);
++}
+ EXPORT_SYMBOL(inode_permission);
+ 
+ /*
+@@ -680,20 +904,27 @@ EXPORT_SYMBOL(inode_permission);
+  * on IOP_FASTPERM can still get the optimization if they set IOP_FASTPERM_MAY_EXEC
+  * on their directory inodes.
+  */
+-static __always_inline int lookup_inode_permission_may_exec(struct mnt_idmap *idmap,
+-	struct inode *inode, int mask)
++static __always_inline int lookup_inode_permission_may_exec(
++		struct mnt_idmap *idmap, struct inode *inode, int mask,
++		const struct path *path, bool *generic_dac_denied)
+ {
+ 	/* Lookup already checked this to return -ENOTDIR */
+ 	VFS_BUG_ON_INODE(!S_ISDIR(inode->i_mode), inode);
+ 	VFS_BUG_ON((mask & ~MAY_NOT_BLOCK) != 0);
++	if (generic_dac_denied)
++		*generic_dac_denied = false;
+ 
+ 	mask |= MAY_EXEC;
+ 
+ 	if (unlikely(!(inode->i_opflags & (IOP_FASTPERM | IOP_FASTPERM_MAY_EXEC))))
+-		return inode_permission(idmap, inode, mask);
++		return inode_permission_path(idmap, inode, mask, path,
++					     AUTH_FS_TRAVERSE, 0,
++					     generic_dac_denied);
+ 
+ 	if (unlikely(((inode->i_mode & 0111) != 0111) || !no_acl_inode(inode)))
+-		return inode_permission(idmap, inode, mask);
++		return inode_permission_path(idmap, inode, mask, path,
++					     AUTH_FS_TRAVERSE, 0,
++					     generic_dac_denied);
+ 
+ 	return security_inode_permission(inode, mask);
+ }
+@@ -1952,28 +2183,41 @@ static struct dentry *lookup_slow_killable(const struct qstr *name,
+ 	return res;
+ }
+ 
++/*
++ * FS_TRAVERSE is intentionally available only to dirfd-rooted LOOKUP_BENEATH
++ * or LOOKUP_IN_ROOT walks. Ancestors of the scope are never authorized here.
++ */
+ static inline int may_lookup(struct mnt_idmap *idmap,
+ 			     struct nameidata *restrict nd)
+ {
++	const struct path *path = nd->flags & LOOKUP_IS_SCOPED ?
++		&nd->path : NULL;
++	bool generic_dac_denied;
+ 	int err, mask;
+ 
+ 	mask = nd->flags & LOOKUP_RCU ? MAY_NOT_BLOCK : 0;
+-	err = lookup_inode_permission_may_exec(idmap, nd->inode, mask);
++	err = lookup_inode_permission_may_exec(idmap, nd->inode, mask,
++					       nd->flags & LOOKUP_RCU ? NULL : path,
++					       nd->flags & LOOKUP_RCU ?
++					       &generic_dac_denied : NULL);
+ 	if (likely(!err))
+ 		return 0;
+ 
+-	// If we failed, and we weren't in LOOKUP_RCU, it's final
+ 	if (!(nd->flags & LOOKUP_RCU))
+ 		return err;
+ 
+-	// Drop out of RCU mode to make sure it wasn't transient
++	/* A scoped authority ancestry check requires a pinned path. */
+ 	if (!try_to_unlazy(nd))
+-		return -ECHILD;	// redo it all non-lazy
++		return -ECHILD;
+ 
+-	if (err != -ECHILD)	// hard error
++	if (err != -ECHILD &&
++	    !(err == -EACCES && generic_dac_denied))
+ 		return err;
+ 
+-	return lookup_inode_permission_may_exec(idmap, nd->inode, 0);
++	idmap = mnt_idmap(nd->path.mnt);
++	path = nd->flags & LOOKUP_IS_SCOPED ? &nd->path : NULL;
++	return lookup_inode_permission_may_exec(idmap, nd->inode, 0, path,
++						NULL);
+ }
+ 
+ static int reserve_stack(struct nameidata *nd, struct path *link)
+@@ -3675,8 +3919,11 @@ EXPORT_SYMBOL(__check_sticky);
+  * 11. We don't allow removal of NFS sillyrenamed files; it's handled by
+  *     nfs_async_unlink().
+  */
+-int may_delete_dentry(struct mnt_idmap *idmap, struct inode *dir,
+-		      struct dentry *victim, bool isdir)
++static int may_delete_dentry_common(struct mnt_idmap *idmap,
++				    struct inode *dir,
++				    struct dentry *victim, bool isdir,
++				    const struct path *operation_parent,
++				    enum authority_fs_right operation_right)
+ {
+ 	struct inode *inode = d_backing_inode(victim);
+ 	int error;
+@@ -3684,6 +3931,12 @@ int may_delete_dentry(struct mnt_idmap *idmap, struct inode *dir,
+ 	if (d_is_negative(victim))
+ 		return -ENOENT;
+ 	BUG_ON(!inode);
++	if (!isdir && !operation_parent) {
++		error = authority_fs_operation_check(current_cred(), NULL,
++						     (enum authority_fs_operation)operation_right);
++		if (error)
++			return error;
++	}
+ 
+ 	BUG_ON(victim->d_parent->d_inode != dir);
+ 
+@@ -3694,7 +3947,16 @@ int may_delete_dentry(struct mnt_idmap *idmap, struct inode *dir,
+ 
+ 	audit_inode_child(dir, victim, AUDIT_TYPE_CHILD_DELETE);
+ 
+-	error = inode_permission(idmap, dir, MAY_WRITE | MAY_EXEC);
++	if (operation_parent) {
++		if (operation_parent->dentry != victim->d_parent ||
++		    d_inode(operation_parent->dentry) != dir)
++			return -EINVAL;
++		error = inode_permission_path(idmap, dir, MAY_WRITE | MAY_EXEC,
++					      operation_parent,
++					      operation_right, 0, NULL);
++	} else {
++		error = inode_permission(idmap, dir, MAY_WRITE | MAY_EXEC);
++	}
+ 	if (error)
+ 		return error;
+ 	if (IS_APPEND(dir))
+@@ -3717,6 +3979,13 @@ int may_delete_dentry(struct mnt_idmap *idmap, struct inode *dir,
+ 		return -EBUSY;
+ 	return 0;
+ }
++
++int may_delete_dentry(struct mnt_idmap *idmap, struct inode *dir,
++		      struct dentry *victim, bool isdir)
++{
++	return may_delete_dentry_common(idmap, dir, victim, isdir, NULL,
++					AUTH_FS_DELETE_FILE);
++}
+ EXPORT_SYMBOL(may_delete_dentry);
+ 
+ /*	Check whether we can create an object with dentry child in directory
+@@ -3728,8 +3997,10 @@ EXPORT_SYMBOL(may_delete_dentry);
+  *  4. We should have write and exec permissions on dir
+  *  5. We can't do it if dir is immutable (done in permission())
+  */
+-int may_create_dentry(struct mnt_idmap *idmap,
+-		      struct inode *dir, struct dentry *child)
++static int may_create_dentry_common(struct mnt_idmap *idmap,
++				    struct inode *dir, struct dentry *child,
++				    const struct path *operation_parent,
++				    enum authority_fs_right operation_right)
+ {
+ 	audit_inode_child(dir, child, AUDIT_TYPE_CHILD_CREATE);
+ 	if (child->d_inode)
+@@ -3738,9 +4009,26 @@ int may_create_dentry(struct mnt_idmap *idmap,
+ 		return -ENOENT;
+ 	if (!fsuidgid_has_mapping(dir->i_sb, idmap))
+ 		return -EOVERFLOW;
+-
++	if (operation_parent) {
++		if (operation_parent->dentry != child->d_parent ||
++		    d_inode(operation_parent->dentry) != dir)
++			return -EINVAL;
++		/* Rename moves an existing object; do not treat it as an append. */
++		if (operation_right == AUTH_FS_RENAME && IS_APPEND(dir))
++			return -EPERM;
++		return inode_permission_path(idmap, dir, MAY_WRITE | MAY_EXEC,
++					     operation_parent,
++					     operation_right, 0, NULL);
++	}
+ 	return inode_permission(idmap, dir, MAY_WRITE | MAY_EXEC);
+ }
++
++int may_create_dentry(struct mnt_idmap *idmap,
++		      struct inode *dir, struct dentry *child)
++{
++	return may_create_dentry_common(idmap, dir, child, NULL,
++					AUTH_FS_CREATE_FILE);
++}
+ EXPORT_SYMBOL(may_create_dentry);
+ 
+ // p1 != p2, both are on the same filesystem, ->s_vfs_rename_mutex is held
+@@ -4233,6 +4521,7 @@ static int may_open(struct mnt_idmap *idmap, const struct path *path,
+ {
+ 	struct dentry *dentry = path->dentry;
+ 	struct inode *inode = dentry->d_inode;
++	u32 required_access = 0;
+ 	int error;
+ 
+ 	if (!inode)
+@@ -4266,7 +4555,18 @@ static int may_open(struct mnt_idmap *idmap, const struct path *path,
+ 		VFS_BUG_ON_INODE(!IS_ANON_FILE(inode), inode);
+ 	}
+ 
+-	error = inode_permission(idmap, inode, MAY_OPEN | acc_mode);
++	/* Translate the complete requested FD access mode into semantic rights. */
++	if (acc_mode & MAY_READ)
++		required_access |= AUTH_FS_ACCESS_READ;
++	if (acc_mode & MAY_WRITE)
++		required_access |= AUTH_FS_ACCESS_WRITE;
++
++	if (S_ISREG(inode->i_mode) && required_access)
++		error = inode_permission_path(idmap, inode, MAY_OPEN | acc_mode,
++					      path, AUTH_FS_READ_FILE,
++					      required_access, NULL);
++	else
++		error = inode_permission(idmap, inode, MAY_OPEN | acc_mode);
+ 	if (error)
+ 		return error;
+ 
+@@ -4312,9 +4612,32 @@ static inline int open_to_namei_flags(int flag)
+ 	return flag;
+ }
+ 
++/*
++ * A created struct file is a new bearer capability. In a confined domain,
++ * CREATE authorizes object instantiation, but the requested initial data
++ * access must independently be covered by scopes for handled READ/WRITE.
++ * Unhandled data operations retain Linux's creation semantics. Existing
++ * directory scopes already cover future descendants; no grant is inherited
++ * or synthesized from CREATE itself.
++ */
++static int may_open_created_access(const struct path *path, int acc_mode)
++{
++	if (!authority_is_confined(current_cred()))
++		return 0;
++	if ((acc_mode & MAY_READ) &&
++	    authority_fs_right_handled(current_cred(), AUTH_FS_READ_FILE) &&
++	    !authority_allows_fs(current_cred(), path, AUTH_FS_READ_FILE))
++		return -EACCES;
++	if ((acc_mode & MAY_WRITE) &&
++	    authority_fs_right_handled(current_cred(), AUTH_FS_WRITE_FILE) &&
++	    !authority_allows_fs(current_cred(), path, AUTH_FS_WRITE_FILE))
++		return -EACCES;
++	return 0;
++}
++
+ static int may_o_create(struct mnt_idmap *idmap,
+ 			const struct path *dir, struct dentry *dentry,
+-			umode_t mode)
++			umode_t mode, int acc_mode)
+ {
+ 	int error = security_path_mknod(dir, dentry, mode, 0);
+ 	if (error)
+@@ -4323,11 +4646,23 @@ static int may_o_create(struct mnt_idmap *idmap,
+ 	if (!fsuidgid_has_mapping(dir->dentry->d_sb, idmap))
+ 		return -EOVERFLOW;
+ 
+-	error = inode_permission(idmap, dir->dentry->d_inode,
+-				 MAY_WRITE | MAY_EXEC);
++	/* This call site is specifically O_CREAT of a regular file. */
++	error = inode_permission_path(idmap, dir->dentry->d_inode,
++				      MAY_WRITE | MAY_EXEC, dir,
++				      AUTH_FS_CREATE_FILE, 0, NULL);
+ 	if (error)
+ 		return error;
+ 
++	/* Validate the output file-description rights before instantiation. */
++	{
++		struct path child = *dir;
++
++		child.dentry = dentry;
++		error = may_open_created_access(&child, acc_mode);
++		if (error)
++			return error;
++	}
++
+ 	return security_inode_create(dir->dentry->d_inode, dentry, mode);
+ }
+ 
+@@ -4510,7 +4845,7 @@ static struct dentry *lookup_open(struct nameidata *nd, struct file *file,
+ 		mode = vfs_prepare_mode(idmap, dir_inode, mode, mode, mode);
+ 		if (likely(got_write))
+ 			create_error = may_o_create(idmap, &nd->path,
+-						    dentry, mode);
++						    dentry, mode, op->acc_mode);
+ 		else
+ 			create_error = -EROFS;
+ 	}
+@@ -4823,7 +5158,13 @@ static int do_open(struct nameidata *nd,
+ 	do_truncate = false;
+ 	acc_mode = op->acc_mode;
+ 	if (file->f_mode & FMODE_CREATED) {
+-		/* Don't check for write permission, don't truncate */
++		/*
++		 * Don't re-run generic DAC checks on the just-created inode or
++		 * truncate it. In confined mode may_o_create() has already
++		 * validated both CREATE and the independently scoped initial
++		 * READ/WRITE rights before the inode was instantiated. Outside
++		 * confinement preserve ordinary Linux O_CREAT semantics.
++		 */
+ 		open_flag &= ~O_TRUNC;
+ 		acc_mode = 0;
+ 	} else if (d_is_reg(nd->path.dentry) && open_flag & O_TRUNC) {
+@@ -4877,8 +5218,9 @@ int vfs_tmpfile(struct mnt_idmap *idmap,
+ 	if (!fsuidgid_has_mapping(dir->i_sb, idmap))
+ 		return -EOVERFLOW;
+ 
+-	/* we want directory to be writable */
+-	error = inode_permission(idmap, dir, MAY_WRITE | MAY_EXEC);
++	/* O_TMPFILE instantiates an object under the same CREATE policy. */
++	error = inode_permission_path(idmap, dir, MAY_WRITE | MAY_EXEC,
++				      parentpath, AUTH_FS_CREATE_FILE, 0, NULL);
+ 	if (error)
+ 		return error;
+ 	if (!dir->i_op->tmpfile)
+@@ -4888,6 +5230,16 @@ int vfs_tmpfile(struct mnt_idmap *idmap,
+ 		return -ENOMEM;
+ 	file->__f_path.mnt = parentpath->mnt;
+ 	file->__f_path.dentry = child;
++	{
++		struct path child_path = *parentpath;
++		child_path.dentry = child;
++		error = may_open_created_access(&child_path,
++						ACC_MODE(open_flag));
++		if (error) {
++			dput(child);
++			return error;
++		}
++	}
+ 	mode = vfs_prepare_mode(idmap, dir, mode, mode, mode);
+ 	error = dir->i_op->tmpfile(idmap, dir, file, mode);
+ 	dput(child);
+@@ -5182,7 +5534,9 @@ struct file *dentry_create(struct path *path, int flags, umode_t mode,
+ 		path->dentry = dir;
+ 		mode = vfs_prepare_mode(idmap, dir_inode, mode, S_IALLUGO, S_IFREG);
+ 
+-		create_error = may_o_create(idmap, path, dentry, mode);
++		create_error = may_o_create(idmap, path, dentry, mode,
++					    ACC_MODE(flags) |
++					    ((flags & O_TRUNC) ? MAY_WRITE : 0));
+ 		if (create_error)
+ 			flags &= ~O_CREAT;
+ 
+@@ -5208,7 +5562,22 @@ struct file *dentry_create(struct path *path, int flags, umode_t mode,
+ 		path->dentry = dentry;
+ 
+ 	} else {
+-		error = vfs_create(mnt_idmap(path->mnt), path->dentry, mode, NULL);
++		if (authority_is_confined(current_cred())) {
++			struct path parent = *path;
++
++			parent.dentry = dir;
++			error = authority_fs_operation_check(current_cred(), &parent,
++							     AUTH_FS_OP_CREATE_FILE);
++			if (!error)
++				error = may_open_created_access(path,
++						       ACC_MODE(flags) |
++						       ((flags & O_TRUNC) ? MAY_WRITE : 0));
++		} else {
++			error = 0;
++		}
++		if (!error)
++			error = vfs_create(mnt_idmap(path->mnt), path->dentry,
++					   mode, NULL);
+ 		if (!error)
+ 			error = vfs_open(path, file);
+ 	}
+@@ -5596,11 +5965,12 @@ SYSCALL_DEFINE1(rmdir, const char __user *, pathname)
+ }
+ 
+ /**
+- * vfs_unlink - unlink a filesystem object
++ * vfs_unlink_internal - unlink a filesystem object with optional parent context
+  * @idmap:	idmap of the mount the inode was found from
+  * @dir:	parent directory
+  * @dentry:	victim
+  * @delegated_inode: returns victim inode, if the inode is delegated.
++ * @delete_parent: pinned parent path for authority checks, or NULL
+  *
+  * The caller must hold dir->i_rwsem exclusively.
+  *
+@@ -5620,11 +5990,15 @@ SYSCALL_DEFINE1(rmdir, const char __user *, pathname)
+  * On non-idmapped mounts or if permission checking is to be performed on the
+  * raw inode simply pass @nop_mnt_idmap.
+  */
+-int vfs_unlink(struct mnt_idmap *idmap, struct inode *dir,
+-	       struct dentry *dentry, struct delegated_inode *delegated_inode)
++static int vfs_unlink_internal(struct mnt_idmap *idmap, struct inode *dir,
++			       struct dentry *dentry,
++			       struct delegated_inode *delegated_inode,
++			       const struct path *delete_parent)
+ {
+ 	struct inode *target = dentry->d_inode;
+-	int error = may_delete_dentry(idmap, dir, dentry, false);
++	int error = may_delete_dentry_common(idmap, dir, dentry, false,
++					     delete_parent,
++					     AUTH_FS_DELETE_FILE);
+ 
+ 	if (error)
+ 		return error;
+@@ -5666,6 +6040,11 @@ int vfs_unlink(struct mnt_idmap *idmap, struct inode *dir,
+ 
+ 	return error;
+ }
++int vfs_unlink(struct mnt_idmap *idmap, struct inode *dir,
++	       struct dentry *dentry, struct delegated_inode *delegated_inode)
++{
++	return vfs_unlink_internal(idmap, dir, dentry, delegated_inode, NULL);
++}
+ EXPORT_SYMBOL(vfs_unlink);
+ 
+ /*
+@@ -5716,8 +6095,9 @@ int filename_unlinkat(int dfd, struct filename *name)
+ 	error = security_path_unlink(&path, dentry);
+ 	if (error)
+ 		goto exit_end_dirop;
+-	error = vfs_unlink(mnt_idmap(path.mnt), path.dentry->d_inode,
+-			   dentry, &delegated_inode);
++	error = vfs_unlink_internal(mnt_idmap(path.mnt),
++				    path.dentry->d_inode, dentry,
++				    &delegated_inode, &path);
+ exit_end_dirop:
+ 	end_dirop(dentry);
+ 	iput(inode);	/* truncate the inode here */
+@@ -5737,6 +6117,81 @@ int filename_unlinkat(int dfd, struct filename *name)
+ 	return error;
+ }
+ 
++int filename_unlinkat_cap(int dfd, struct filename *name)
++{
++	const char *component;
++	struct delegated_inode delegated_inode = { };
++	struct file *dirfile;
++	struct fd f;
++	struct path path;
++	struct qstr last;
++	struct dentry *dentry;
++	struct inode *inode;
++	unsigned int lookup_flags = 0;
++	int error;
++
++	if (dfd < 0 || !name || IS_ERR(name))
++		return -EINVAL;
++	component = name->name;
++	if (!component || !component[0] || strchr(component, '/') ||
++	    !strcmp(component, ".") || !strcmp(component, ".."))
++		return -EINVAL;
++
++	f = fdget_raw(dfd);
++	if (fd_empty(f))
++		return -EBADF;
++	dirfile = fd_file(f);
++	if (!file_inode(dirfile) || !S_ISDIR(file_inode(dirfile)->i_mode)) {
++		error = -ENOTDIR;
++		goto out_fd;
++	}
++
++	/* The only lookup root is the already-open parent directory handle. */
++	path = dirfile->f_path;
++	last.name = component;
++	last.len = strlen(component);
++	if (last.len > NAME_MAX) {
++		error = -ENAMETOOLONG;
++		goto out_fd;
++	}
++	error = lookup_noperm_common(&last, path.dentry);
++	if (error)
++		goto out_fd;
++retry:
++	error = mnt_want_write(path.mnt);
++	if (error)
++		goto out_fd;
++retry_deleg:
++	dentry = start_dirop(path.dentry, &last, lookup_flags);
++	error = PTR_ERR(dentry);
++	if (IS_ERR(dentry))
++		goto out_drop_write;
++
++	inode = dentry->d_inode;
++	ihold(inode);
++	error = security_path_unlink(&path, dentry);
++	if (!error)
++		error = vfs_unlink_internal(mnt_idmap(path.mnt),
++					    d_inode(path.dentry), dentry,
++					    &delegated_inode, &path);
++	end_dirop(dentry);
++	iput(inode);
++	if (is_delegated(&delegated_inode)) {
++		error = break_deleg_wait(&delegated_inode);
++		if (!error)
++			goto retry_deleg;
++	}
++out_drop_write:
++	mnt_drop_write(path.mnt);
++	if (retry_estale(error, lookup_flags)) {
++		lookup_flags |= LOOKUP_REVAL;
++		goto retry;
++	}
++out_fd:
++	fdput(f);
++	return error;
++}
++
+ SYSCALL_DEFINE3(unlinkat, int, dfd, const char __user *, pathname, int, flag)
+ {
+ 	if ((flag & ~AT_REMOVEDIR) != 0)
+@@ -5847,11 +6302,12 @@ SYSCALL_DEFINE2(symlink, const char __user *, oldname, const char __user *, newn
+ }
+ 
+ /**
+- * vfs_link - create a new link
++ * __vfs_link - create a new link with optional destination context
+  * @old_dentry:	object to be linked
+  * @idmap:	idmap of the mount
+  * @dir:	new parent
+  * @new_dentry:	where to create the new link
++ * @new_parent_path: pinned destination parent for authority checks, or NULL
+  * @delegated_inode: returns inode needing a delegation break
+  *
+  * The caller must hold dir->i_rwsem exclusively.
+@@ -5872,9 +6328,10 @@ SYSCALL_DEFINE2(symlink, const char __user *, oldname, const char __user *, newn
+  * On non-idmapped mounts or if permission checking is to be performed on the
+  * raw inode simply pass @nop_mnt_idmap.
+  */
+-int vfs_link(struct dentry *old_dentry, struct mnt_idmap *idmap,
+-	     struct inode *dir, struct dentry *new_dentry,
+-	     struct delegated_inode *delegated_inode)
++static int __vfs_link(struct dentry *old_dentry, struct mnt_idmap *idmap,
++		      struct inode *dir, struct dentry *new_dentry,
++		      const struct path *new_parent_path,
++		      struct delegated_inode *delegated_inode)
+ {
+ 	struct inode *inode = old_dentry->d_inode;
+ 	unsigned max_links = dir->i_sb->s_max_links;
+@@ -5883,7 +6340,21 @@ int vfs_link(struct dentry *old_dentry, struct mnt_idmap *idmap,
+ 	if (!inode)
+ 		return -ENOENT;
+ 
+-	error = may_create_dentry(idmap, dir, new_dentry);
++	if (new_parent_path) {
++		if (!new_parent_path->mnt ||
++		    mnt_idmap(new_parent_path->mnt) != idmap)
++			return -EINVAL;
++		error = may_create_dentry_common(idmap, dir, new_dentry,
++						 new_parent_path,
++						 AUTH_FS_LINK);
++	} else {
++		/* Context-free callers cannot satisfy a mandatory LINK domain. */
++		error = authority_fs_operation_check(current_cred(), NULL,
++						     AUTH_FS_OP_LINK);
++		if (error)
++			return error;
++		error = may_create_dentry(idmap, dir, new_dentry);
++	}
+ 	if (error)
+ 		return error;
+ 
+@@ -5935,8 +6406,35 @@ int vfs_link(struct dentry *old_dentry, struct mnt_idmap *idmap,
+ 		fsnotify_link(dir, inode, new_dentry);
+ 	return error;
+ }
++
++int vfs_link(struct dentry *old_dentry, struct mnt_idmap *idmap,
++	     struct inode *dir, struct dentry *new_dentry,
++	     struct delegated_inode *delegated_inode)
++{
++	return __vfs_link(old_dentry, idmap, dir, new_dentry, NULL,
++			  delegated_inode);
++}
+ EXPORT_SYMBOL(vfs_link);
+ 
++int vfs_link_path(struct dentry *old_dentry,
++		  const struct path *new_parent_path,
++		  struct dentry *new_dentry,
++		  struct delegated_inode *delegated_inode)
++{
++	struct inode *dir;
++
++	if (!new_parent_path || !new_parent_path->mnt ||
++	    !new_parent_path->dentry)
++		return -EINVAL;
++	dir = d_inode(new_parent_path->dentry);
++	if (!dir)
++		return -ENOTDIR;
++
++	return __vfs_link(old_dentry, mnt_idmap(new_parent_path->mnt),
++			  dir, new_dentry, new_parent_path, delegated_inode);
++}
++EXPORT_SYMBOL(vfs_link_path);
++
+ /*
+  * Hardlinks are often used in delicate situations.  We avoid
+  * security-related surprises by not following symlinks on the
+@@ -5990,8 +6488,8 @@ int filename_linkat(int olddfd, struct filename *old,
+ 	error = security_path_link(old_path.dentry, &new_path, new_dentry);
+ 	if (error)
+ 		goto out_dput;
+-	error = vfs_link(old_path.dentry, idmap, new_path.dentry->d_inode,
+-			 new_dentry, &delegated_inode);
++	error = vfs_link_path(old_path.dentry, &new_path, new_dentry,
++			      &delegated_inode);
+ out_dput:
+ 	end_creating_path(&new_path, new_dentry);
+ 	if (is_delegated(&delegated_inode)) {
+@@ -6027,8 +6525,10 @@ SYSCALL_DEFINE2(link, const char __user *, oldname, const char __user *, newname
+ }
+ 
+ /**
+- * vfs_rename - rename a filesystem object
++ * vfs_rename_internal - rename an object with optional parent contexts
+  * @rd:		pointer to &struct renamedata info
++ * @old_parent_path: pinned source parent for authority checks, or NULL
++ * @new_parent_path: pinned destination parent for authority checks, or NULL
+  *
+  * The caller must hold multiple mutexes--see lock_rename()).
+  *
+@@ -6072,7 +6572,9 @@ SYSCALL_DEFINE2(link, const char __user *, oldname, const char __user *, newname
+  *	   ->i_rwsem on parents, which works but leads to some truly excessive
+  *	   locking].
+  */
+-int vfs_rename(struct renamedata *rd)
++static int vfs_rename_internal(struct renamedata *rd,
++			      const struct path *old_parent_path,
++			      const struct path *new_parent_path)
+ {
+ 	int error;
+ 	struct inode *old_dir = d_inode(rd->old_parent);
+@@ -6089,24 +6591,66 @@ int vfs_rename(struct renamedata *rd)
+ 	struct name_snapshot old_name;
+ 	bool lock_old_subdir, lock_new_subdir;
+ 
++	/* Regular-file rename checks both exact parent contexts independently. */
++	if (!is_dir) {
++		error = authority_fs_operation_check(current_cred(),
++						     old_parent_path,
++						     AUTH_FS_OP_RENAME);
++		if (error)
++			return error;
++		error = authority_fs_operation_check(current_cred(),
++						     new_parent_path,
++						     AUTH_FS_OP_RENAME);
++		if (error)
++			return error;
++	}
++
+ 	if (source == target)
+ 		return 0;
+ 
+-	error = may_delete_dentry(rd->mnt_idmap, old_dir, old_dentry, is_dir);
++	if (old_parent_path)
++		error = may_delete_dentry_common(rd->mnt_idmap, old_dir,
++						old_dentry, is_dir,
++						old_parent_path,
++						AUTH_FS_RENAME);
++	else
++		error = may_delete_dentry(rd->mnt_idmap, old_dir,
++					 old_dentry, is_dir);
+ 	if (error)
+ 		return error;
+ 
+ 	if (!target) {
+-		error = may_create_dentry(rd->mnt_idmap, new_dir, new_dentry);
++		if (new_parent_path)
++			error = may_create_dentry_common(rd->mnt_idmap, new_dir,
++							new_dentry,
++							new_parent_path,
++							AUTH_FS_RENAME);
++		else
++			error = may_create_dentry(rd->mnt_idmap, new_dir,
++						  new_dentry);
+ 	} else {
+ 		new_is_dir = d_is_dir(new_dentry);
+ 
+-		if (!(flags & RENAME_EXCHANGE))
+-			error = may_delete_dentry(rd->mnt_idmap, new_dir,
+-						  new_dentry, is_dir);
+-		else
++		if (!(flags & RENAME_EXCHANGE)) {
++			if (new_parent_path)
++				error = may_delete_dentry_common(rd->mnt_idmap,
++								new_dir, new_dentry,
++								is_dir,
++								new_parent_path,
++								AUTH_FS_RENAME);
++			else
++				error = may_delete_dentry(rd->mnt_idmap,
++							 new_dir, new_dentry,
++							 is_dir);
++		} else if (new_parent_path && !is_dir && !new_is_dir) {
++			error = may_delete_dentry_common(rd->mnt_idmap, new_dir,
++							new_dentry, new_is_dir,
++							new_parent_path,
++							AUTH_FS_RENAME);
++		} else {
+ 			error = may_delete_dentry(rd->mnt_idmap, new_dir,
+ 						  new_dentry, new_is_dir);
++		}
+ 	}
+ 	if (error)
+ 		return error;
+@@ -6242,8 +6786,119 @@ int vfs_rename(struct renamedata *rd)
+ 
+ 	return error;
+ }
++
++int vfs_rename(struct renamedata *rd)
++{
++	return vfs_rename_internal(rd, NULL, NULL);
++}
+ EXPORT_SYMBOL(vfs_rename);
+ 
++int filename_renameat_cap(int olddfd, struct filename *from,
++			  int newdfd, struct filename *to, unsigned int flags)
++{
++	const char *old_component, *new_component;
++	struct delegated_inode delegated_inode = { };
++	struct file *old_file, *new_file;
++	struct fd old_fd, new_fd;
++	struct path old_path, new_path;
++	struct qstr old_last, new_last;
++	struct renamedata rd;
++	unsigned int lookup_flags = 0;
++	int error;
++
++	if (olddfd < 0 || newdfd < 0 || !from || IS_ERR(from) ||
++	    !to || IS_ERR(to))
++		return -EINVAL;
++	if (flags)
++		return -EOPNOTSUPP;
++	old_component = from->name;
++	new_component = to->name;
++	if (!old_component || !old_component[0] || strchr(old_component, '/') ||
++	    !strcmp(old_component, ".") || !strcmp(old_component, "..") ||
++	    !new_component || !new_component[0] || strchr(new_component, '/') ||
++	    !strcmp(new_component, ".") || !strcmp(new_component, ".."))
++		return -EINVAL;
++
++	old_fd = fdget_raw(olddfd);
++	if (fd_empty(old_fd))
++		return -EBADF;
++	new_fd = fdget_raw(newdfd);
++	if (fd_empty(new_fd)) {
++		fdput(old_fd);
++		return -EBADF;
++	}
++	old_file = fd_file(old_fd);
++	new_file = fd_file(new_fd);
++	if (!file_inode(old_file) || !S_ISDIR(file_inode(old_file)->i_mode) ||
++	    !file_inode(new_file) || !S_ISDIR(file_inode(new_file)->i_mode)) {
++		error = -ENOTDIR;
++		goto out_fds;
++	}
++	old_path = old_file->f_path;
++	new_path = new_file->f_path;
++	if (old_path.mnt != new_path.mnt) {
++		error = -EXDEV;
++		goto out_fds;
++	}
++
++	old_last.name = old_component;
++	old_last.len = strlen(old_component);
++	new_last.name = new_component;
++	new_last.len = strlen(new_component);
++	if (old_last.len > NAME_MAX || new_last.len > NAME_MAX) {
++		error = -ENAMETOOLONG;
++		goto out_fds;
++	}
++	error = lookup_noperm_common(&old_last, old_path.dentry);
++	if (error)
++		goto out_fds;
++	error = lookup_noperm_common(&new_last, new_path.dentry);
++	if (error)
++		goto out_fds;
++
++retry:
++	error = mnt_want_write(old_path.mnt);
++	if (error)
++		goto out_fds;
++retry_deleg:
++	rd.old_parent = old_path.dentry;
++	rd.mnt_idmap = mnt_idmap(old_path.mnt);
++	rd.new_parent = new_path.dentry;
++	rd.delegated_inode = &delegated_inode;
++	rd.flags = 0;
++	error = __start_renaming(&rd, lookup_flags, &old_last, &new_last);
++	if (error)
++		goto out_drop_write;
++
++	if (d_is_negative(rd.old_dentry))
++		error = -ENOENT;
++	else if (!S_ISREG(d_inode(rd.old_dentry)->i_mode) ||
++		 (d_is_positive(rd.new_dentry) &&
++		  !S_ISREG(d_inode(rd.new_dentry)->i_mode)))
++		error = -EOPNOTSUPP;
++	if (!error)
++		error = security_path_rename(&old_path, rd.old_dentry,
++					     &new_path, rd.new_dentry, 0);
++	if (!error)
++		error = vfs_rename_internal(&rd, &old_path, &new_path);
++	end_renaming(&rd);
++	if (is_delegated(&delegated_inode)) {
++		error = break_deleg_wait(&delegated_inode);
++		if (!error)
++			goto retry_deleg;
++	}
++out_drop_write:
++	mnt_drop_write(old_path.mnt);
++	if (retry_estale(error, lookup_flags)) {
++		lookup_flags |= LOOKUP_REVAL;
++		goto retry;
++	}
++out_fds:
++	fdput(new_fd);
++	fdput(old_fd);
++	return error;
++}
++
+ int filename_renameat2(int olddfd, struct filename *from,
+ 		       int newdfd, struct filename *to, unsigned int flags)
+ {
+@@ -6323,7 +6978,7 @@ int filename_renameat2(int olddfd, struct filename *from,
+ 	if (error)
+ 		goto exit_unlock;
+ 
+-	error = vfs_rename(&rd);
++	error = vfs_rename_internal(&rd, &old_path, &new_path);
+ exit_unlock:
+ 	end_renaming(&rd);
+ exit_lock_rename:
+diff --git a/fs/notify/fanotify/fanotify_user.c b/fs/notify/fanotify/fanotify_user.c
+index a32c6634d59278d996f27ee93f13c070a9be764a..dbdb0da8a83024e46533744cf9e02f06c4bd12bd 100644
+--- a/fs/notify/fanotify/fanotify_user.c
++++ b/fs/notify/fanotify/fanotify_user.c
+@@ -10,6 +10,7 @@
+ #include <linux/namei.h>
+ #include <linux/poll.h>
+ #include <linux/security.h>
++#include <linux/authority.h>
+ #include <linux/syscalls.h>
+ #include <linux/slab.h>
+ #include <linux/types.h>
+@@ -357,7 +358,26 @@ static int create_fd(struct fsnotify_group *group, const struct path *path,
+ 		     struct file **file)
+ {
+ 	int client_fd;
++	int error;
+ 	struct file *new_file;
++	struct inode *inode = d_inode(path->dentry);
++
++	/* Fanotify event FDs are fresh file descriptions, not path aliases. */
++	if (S_ISREG(inode->i_mode)) {
++		u32 access = 0;
++		int accmode = group->fanotify_data.f_flags & O_ACCMODE;
++
++		if (accmode != O_WRONLY)
++			access |= AUTH_FS_ACCESS_READ;
++		if (accmode != O_RDONLY)
++			access |= AUTH_FS_ACCESS_WRITE;
++		if (access) {
++			error = authority_fs_access_ceiling_check(current_cred(), path,
++							 access);
++			if (error)
++				return error;
++		}
++	}
+ 
+ 	client_fd = get_unused_fd_flags(group->fanotify_data.f_flags);
+ 	if (client_fd < 0)
+diff --git a/fs/open.c b/fs/open.c
+index 6b1c14e684a93b2ec74e3b5f22fe7dd562a249e1..daa5ee643f4adde51abf5c5e82d1742a652a7427 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -8,6 +8,7 @@
+ #include <linux/string.h>
+ #include <linux/mm.h>
+ #include <linux/file.h>
++#include <linux/file_capability.h>
+ #include <linux/fdtable.h>
+ #include <linux/fsnotify.h>
+ #include <linux/module.h>
+@@ -85,7 +86,10 @@ int vfs_truncate(const struct path *path, loff_t length)
+ 		return -EINVAL;
+ 
+ 	idmap = mnt_idmap(path->mnt);
+-	error = inode_permission(idmap, inode, MAY_WRITE);
++	/* Path truncate is a fresh WRITE request, just like O_TRUNC at open. */
++	error = inode_permission_path(idmap, inode, MAY_WRITE, path,
++				      AUTH_FS_WRITE_FILE,
++				      AUTH_FS_ACCESS_WRITE, NULL);
+ 	if (error)
+ 		return error;
+ 
+@@ -167,6 +171,8 @@ int do_ftruncate(struct file *file, loff_t length, unsigned int flags)
+ 	struct inode *inode = dentry->d_inode;
+ 	int error;
+ 
++	if (file_cap_managed(file) && !file_cap_has(file, FILE_CAP_WRITE))
++		return -EBADF;
+ 	if (!S_ISREG(inode->i_mode) || !(file->f_mode & FMODE_WRITE))
+ 		return -EINVAL;
+ 
+@@ -285,6 +291,8 @@ int vfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
+ 		return -EOPNOTSUPP;
+ 	}
+ 
++	if (file_cap_managed(file) && !file_cap_has(file, FILE_CAP_WRITE))
++		return -EBADF;
+ 	if (!(file->f_mode & FMODE_WRITE))
+ 		return -EBADF;
+ 
+diff --git a/fs/xfs/xfs_handle.c b/fs/xfs/xfs_handle.c
+index 0689cade8f74c2f0845257ecdcbe616ccfc4f838..381ade3e149cb6f25a653f13712b2529dfe47f4e 100644
+--- a/fs/xfs/xfs_handle.c
++++ b/fs/xfs/xfs_handle.c
+@@ -28,6 +28,7 @@
+ #include "xfs_xattr.h"
+ #include "xfs_acl.h"
+ 
++#include <linux/authority.h>
+ #include <linux/namei.h>
+ 
+ static inline size_t
+@@ -271,6 +272,24 @@ xfs_open_by_handle(
+ 
+ 	path.mnt = mntget(parfilp->f_path.mnt);
+ 
++	/* This privileged ioctl creates a fresh file description without may_open(). */
++	if (S_ISREG(inode->i_mode)) {
++		const struct cred *subject = current_cred();
++		u32 access = 0;
++
++		if (fmode & FMODE_READ)
++			access |= AUTH_FS_ACCESS_READ;
++		if ((fmode & FMODE_WRITE) || (permflag & O_TRUNC))
++			access |= AUTH_FS_ACCESS_WRITE;
++		if (access) {
++			int error = authority_fs_access_ceiling_check(subject, &path,
++							     access);
++
++			if (error)
++				return error;
++		}
++	}
++
+ 	FD_PREPARE(fdf, 0, dentry_open(&path, hreq->oflags, cred));
+ 	if (fdf.err)
+ 		return fdf.err;
+diff --git a/include/linux/namei.h b/include/linux/namei.h
+index 86d657b24fc6a163f6206c821fe4453e327de5e4..cbda48d9d73dea28cd95ac8c3cbc2008996bdf27 100644
+--- a/include/linux/namei.h
++++ b/include/linux/namei.h
+@@ -3,6 +3,7 @@
+ #define _LINUX_NAMEI_H
+ 
+ #include <linux/fs.h>
++#include <linux/authority.h>
+ #include <linux/kernel.h>
+ #include <linux/path.h>
+ #include <linux/fcntl.h>
+@@ -46,6 +47,14 @@ enum { MAX_NESTED_LINKS = 8 };
+ /* 3 spare bits for scoping */
+ 
+ extern int path_pts(struct path *path);
++int filename_unlinkat_cap(int dfd, struct filename *name);
++int filename_renameat_cap(int olddfd, struct filename *from,
++			  int newdfd, struct filename *to, unsigned int flags);
++
++int inode_permission_path(struct mnt_idmap *idmap, struct inode *inode,
++			  int mask, const struct path *path,
++			  enum authority_fs_right operation_right,
++			  u32 operation_access, bool *generic_dac_denied);
+ 
+ extern int user_path_at(int, const char __user *, unsigned, struct path *);
+ 
+diff --git a/include/uapi/linux/prctl.h b/include/uapi/linux/prctl.h
+index b6ec6f6937195f2e9b32dc606535342f3a1ebd9b..6710c07a9311d6e15cc815f5634462465d0db937 100644
+--- a/include/uapi/linux/prctl.h
++++ b/include/uapi/linux/prctl.h
+@@ -406,6 +406,63 @@ struct prctl_mm_map {
+  */
+ #define PR_GET_CFI	80
+ #define PR_SET_CFI	81
++
++/* Temporary extensible-rights authority PoC. */
++#define PR_CAPAUTH			0x43415041
++#define PR_CAPAUTH_GET			0
++#define PR_CAPAUTH_NORMAL		1
++#define PR_CAPAUTH_SYSTEM		2
++#define PR_CAPAUTH_HAS_RIGHT		3
++#define PR_CAPAUTH_DROP_RIGHT		4
++#define PR_CAPAUTH_ADD_FS_SCOPE		5
++#define PR_CAPAUTH_HAS_SCOPED_RIGHT	6
++#define PR_CAPAUTH_DROP_FS_SCOPE_RIGHT	7
++#define PR_CAPAUTH_DROP_FS_SCOPE		8
++/* PoC: unlink one direct, non-directory child relative to dirfd. */
++#define PR_CAPAUTH_UNLINKAT		9
++#define PR_CAPAUTH_RENAMEAT2		10
++/* Seal the current authority into an irreversible mandatory domain. */
++#define PR_CAPAUTH_CONFINE		11
++#define PR_CAPAUTH_GET_CONFINED		12
++#define PR_CAPAUTH_CONFINE_VERSION_1	1
++
++/* Variable-length handled-rights bitmap; bits are filesystem right IDs. */
++struct pr_capauth_confine {
++	__u32 size;
++	__u16 version;
++	__u16 flags;
++	__u32 reserved;
++	__u32 reserved2;
++	__u8 handled[];
++};
++
++/* Request for the handle-first, direct-child rename operation. */
++struct pr_capauth_renameat2 {
++	__s32 olddirfd;
++	__s32 newdirfd;
++	__u32 flags;
++	__u32 reserved;
++	__aligned_u64 oldname;
++	__aligned_u64 newname;
++};
++
++/* PoC class/right identifiers for PR_CAPAUTH_HAS_RIGHT/DROP_RIGHT. */
++#define PR_CAPAUTH_CLASS_FILESYSTEM	1
++#define PR_CAPAUTH_FS_DAC_OVERRIDE	0
++#define PR_CAPAUTH_FS_CREATE_FILE	1
++/* MAY_EXEC for paths inside the scope during dirfd-rooted scoped lookups. */
++#define PR_CAPAUTH_FS_TRAVERSE		2
++/* Existing regular-file O_RDONLY open in a bounded scoped lookup. */
++#define PR_CAPAUTH_FS_READ_FILE		3
++/* Existing regular-file write-capable open in a bounded scoped lookup. */
++#define PR_CAPAUTH_FS_WRITE_FILE	4
++/* Remove a direct non-directory entry from this exact parent-directory scope. */
++#define PR_CAPAUTH_FS_DELETE_FILE	5
++/* Atomic regular-file rename; required on both exact parent directories. */
++#define PR_CAPAUTH_FS_RENAME		6
++/* Add an existing non-directory object to a destination parent namespace. */
++#define PR_CAPAUTH_FS_LINK		7
++#define PR_CAPAUTH_FS_TEST_RIGHT_80	80
+ /*
+  * Forward-edge CFI variants (excluding ARM64 BTI, which has its own
+  * prctl()s).
+diff --git a/kernel/sys.c b/kernel/sys.c
+index 35b538ba843c705dba5378f3626ce5610e9db0cf..8c2811b5ff4e255bc2d06671dafbb0036dd49b06 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -6,6 +6,7 @@
+  */
+ 
+ #include <linux/export.h>
++#include <linux/bitmap.h>
+ #include <linux/mm.h>
+ #include <linux/mm_inline.h>
+ #include <linux/utsname.h>
+@@ -61,10 +62,13 @@
+ #include <linux/sched/mm.h>
+ #include <linux/sched/coredump.h>
+ #include <linux/sched/task.h>
++#include <linux/sched/signal.h>
+ #include <linux/sched/cputime.h>
+ #include <linux/rcupdate.h>
+ #include <linux/uidgid.h>
+ #include <linux/cred.h>
++#include <linux/authority.h>
++#include <linux/namei.h>
+ 
+ #include <linux/nospec.h>
+ 
+@@ -2531,6 +2535,161 @@ static int prctl_set_thp_disable(bool thp_disable, unsigned long flags,
+ 	return 0;
+ }
+ 
++static int prctl_capauth_confine(unsigned long arg)
++{
++	struct pr_capauth_confine header;
++	struct authority *updated;
++	struct authority *old = current_cred()->authority;
++	struct cred *new;
++	unsigned long *handled;
++	u8 __user *user_bitmap;
++	size_t bytes;
++	unsigned long bit;
++	int error;
++
++	if (copy_from_user(&header, (void __user *)arg, sizeof(header)))
++		return -EFAULT;
++	if (header.version != PR_CAPAUTH_CONFINE_VERSION_1 || header.flags ||
++	    header.reserved || header.reserved2)
++		return -EINVAL;
++	if (header.size < sizeof(header) + 1)
++		return -EINVAL;
++	if (header.size > PAGE_SIZE)
++		return -E2BIG;
++	if (!thread_group_empty(current))
++		return -EBUSY;
++	if (authority_is_confined(current_cred()))
++		return -EALREADY;
++
++	bytes = header.size - sizeof(header);
++	user_bitmap = (u8 __user *)arg + sizeof(header);
++	handled = bitmap_zalloc(AUTH_FS_TEST_RIGHT_80 + 1, GFP_KERNEL);
++	if (!handled)
++		return -ENOMEM;
++	{
++		u8 *request = memdup_user(user_bitmap, bytes);
++
++		if (IS_ERR(request)) {
++			error = PTR_ERR(request);
++			goto out_bitmap;
++		}
++		for (bit = 0; bit < bytes * 8; bit++) {
++			if (!(request[bit / 8] & BIT(bit % 8)))
++				continue;
++			switch (bit) {
++			/* These legacy bitmap positions select class-local operations. */
++			case AUTH_FS_OP_CREATE_FILE:
++			case AUTH_FS_OP_READ_FILE:
++			case AUTH_FS_OP_WRITE_FILE:
++			case AUTH_FS_OP_DELETE_FILE:
++			case AUTH_FS_OP_RENAME:
++			case AUTH_FS_OP_LINK:
++				__set_bit(bit, handled);
++				break;
++			default:
++				error = -EOPNOTSUPP;
++				kfree(request);
++				goto out_bitmap;
++			}
++		}
++		kfree(request);
++	}
++
++	new = prepare_creds();
++	if (!new) {
++		error = -ENOMEM;
++		goto out_bitmap;
++	}
++	error = authority_enter_confined(old, handled,
++					AUTH_FS_TEST_RIGHT_80 + 1, &updated);
++	if (error) {
++		abort_creds(new);
++		goto out_bitmap;
++	}
++	authority_cred_replace(new, updated);
++	error = commit_creds(new);
++	if (!error)
++		task_set_no_new_privs(current);
++out_bitmap:
++	bitmap_free(handled);
++	return error;
++}
++
++static int prctl_capauth_scope(unsigned long operation,
++			       unsigned long fd_arg, unsigned long right_arg)
++{
++	struct authority *updated;
++	struct cred *new;
++	struct fd f;
++	struct file *file;
++	int ret;
++
++	if (fd_arg > INT_MAX || right_arg > U32_MAX)
++		return -EINVAL;
++	if (operation == PR_CAPAUTH_ADD_FS_SCOPE &&
++	    !capable(CAP_SYS_ADMIN))
++		return -EPERM;
++
++	/* Scope handles are commonly O_PATH directory descriptors. */
++	f = fdget_raw((unsigned int)fd_arg);
++	if (fd_empty(f))
++		return -EBADF;
++	file = fd_file(f);
++
++	if (operation == PR_CAPAUTH_ADD_FS_SCOPE &&
++	    (!file_inode(file) || !S_ISDIR(file_inode(file)->i_mode))) {
++		ret = -ENOTDIR;
++		goto out_fd;
++	}
++
++	if (operation == PR_CAPAUTH_HAS_SCOPED_RIGHT) {
++		bool has_right;
++
++		ret = authority_has_scoped_right(current_cred()->authority,
++						 &file->f_path,
++						 AUTH_CLASS_FILESYSTEM,
++						 right_arg, &has_right);
++		if (!ret)
++			ret = has_right;
++		goto out_fd;
++	}
++
++	new = prepare_creds();
++	if (!new) {
++		ret = -ENOMEM;
++		goto out_fd;
++	}
++
++	switch (operation) {
++	case PR_CAPAUTH_ADD_FS_SCOPE:
++		ret = authority_add_fs_scope(new->authority, &file->f_path,
++					     right_arg, &updated);
++		break;
++	case PR_CAPAUTH_DROP_FS_SCOPE_RIGHT:
++		ret = authority_drop_fs_scope_right(new->authority,
++						    &file->f_path,
++						    right_arg, &updated);
++		break;
++	case PR_CAPAUTH_DROP_FS_SCOPE:
++		ret = authority_drop_fs_scope(new->authority, &file->f_path,
++					      &updated);
++		break;
++	default:
++		ret = -EINVAL;
++		break;
++	}
++	if (ret) {
++		abort_creds(new);
++		goto out_fd;
++	}
++
++	authority_cred_replace(new, updated);
++	ret = commit_creds(new);
++out_fd:
++	fdput(f);
++	return ret;
++}
++
+ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
+ 		unsigned long, arg4, unsigned long, arg5)
+ {
+@@ -2564,6 +2723,151 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
+ 	case PR_GET_PDEATHSIG:
+ 		error = put_user(me->pdeath_signal, (int __user *)arg2);
+ 		break;
++	case PR_CAPAUTH: {
++		bool has_right;
++
++		if (arg2 == PR_CAPAUTH_GET_CONFINED) {
++			error = authority_is_confined(current_cred());
++		} else if (arg2 == PR_CAPAUTH_CONFINE) {
++			if (arg4 || arg5)
++				error = -EINVAL;
++			else
++				error = prctl_capauth_confine(arg3);
++		} else if (arg2 == PR_CAPAUTH_GET) {
++			error = authority_has_right(current_cred()->authority,
++						    AUTH_CLASS_FILESYSTEM,
++						    AUTH_FS_DAC_OVERRIDE,
++						    &has_right);
++			if (!error)
++				error = has_right;
++		} else if (arg2 == PR_CAPAUTH_NORMAL) {
++			struct cred *new = prepare_creds();
++
++			if (!new) {
++				error = -ENOMEM;
++				break;
++			}
++			authority_cred_clear(new);
++			error = commit_creds(new);
++		} else if (arg2 == PR_CAPAUTH_SYSTEM) {
++			struct authority *authority;
++			struct cred *new;
++
++			if (authority_is_confined(current_cred())) {
++				error = -EPERM;
++				break;
++			}
++
++			if (!capable(CAP_SYS_ADMIN)) {
++				error = -EPERM;
++				break;
++			}
++			new = prepare_creds();
++			if (!new) {
++				error = -ENOMEM;
++				break;
++			}
++			authority = authority_create_fs_poc(GFP_KERNEL);
++			if (!authority) {
++				abort_creds(new);
++				error = -ENOMEM;
++				break;
++			}
++			authority_cred_replace(new, authority);
++			error = commit_creds(new);
++		} else if (arg2 == PR_CAPAUTH_HAS_RIGHT) {
++			if (arg3 > U32_MAX || arg4 > U32_MAX) {
++				error = -EINVAL;
++				break;
++			}
++			error = authority_has_right(current_cred()->authority,
++						    arg3, arg4, &has_right);
++			if (!error)
++				error = has_right;
++		} else if (arg2 == PR_CAPAUTH_DROP_RIGHT) {
++			struct authority *reduced;
++			struct cred *new;
++
++			if (arg3 > U32_MAX || arg4 > U32_MAX) {
++				error = -EINVAL;
++				break;
++			}
++			new = prepare_creds();
++			if (!new) {
++				error = -ENOMEM;
++				break;
++			}
++			error = authority_drop_right(new->authority, arg3, arg4,
++						     &reduced);
++			if (error) {
++				abort_creds(new);
++				break;
++			}
++			authority_cred_replace(new, reduced);
++			error = commit_creds(new);
++		} else if (arg2 == PR_CAPAUTH_ADD_FS_SCOPE ||
++			   arg2 == PR_CAPAUTH_HAS_SCOPED_RIGHT ||
++			   arg2 == PR_CAPAUTH_DROP_FS_SCOPE_RIGHT ||
++			   arg2 == PR_CAPAUTH_DROP_FS_SCOPE) {
++			error = prctl_capauth_scope(arg2, arg3, arg4);
++		} else if (arg2 == PR_CAPAUTH_UNLINKAT) {
++			struct filename *name;
++
++
++			if (arg3 > INT_MAX || arg5) {
++				error = -EINVAL;
++				break;
++			}
++			name = getname((const char __user *)arg4);
++			if (IS_ERR(name)) {
++				error = PTR_ERR(name);
++				break;
++			}
++			error = filename_unlinkat_cap((int)arg3, name);
++			putname(name);
++		} else if (arg2 == PR_CAPAUTH_RENAMEAT2) {
++			struct pr_capauth_renameat2 request;
++			struct filename *from, *to;
++
++			if (arg4 || arg5) {
++				error = -EINVAL;
++				break;
++			}
++			if (copy_from_user(&request, (void __user *)arg3,
++					   sizeof(request))) {
++				error = -EFAULT;
++				break;
++			}
++			if (request.reserved || request.olddirfd < 0 ||
++			    request.newdirfd < 0) {
++				error = -EINVAL;
++				break;
++			}
++			if (request.flags) {
++				error = -EOPNOTSUPP;
++				break;
++			}
++			from = getname(u64_to_user_ptr(request.oldname));
++			if (IS_ERR(from)) {
++				error = PTR_ERR(from);
++				break;
++			}
++			to = getname(u64_to_user_ptr(request.newname));
++			if (IS_ERR(to)) {
++				error = PTR_ERR(to);
++				putname(from);
++				break;
++			}
++			error = filename_renameat_cap(request.olddirfd, from,
++						      request.newdirfd, to,
++						      request.flags);
++			putname(to);
++			putname(from);
++		} else {
++			error = -EINVAL;
++		}
++		break;
++	}
+ 	case PR_GET_DUMPABLE:
+ 		error = task_exec_state_get_dumpable(me);
+ 		break;

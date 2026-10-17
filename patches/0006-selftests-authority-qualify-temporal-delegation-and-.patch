@@ -1,0 +1,736 @@
+From 935c956d484fe4c1af8e04f62ec6d3cbc8f80f3f Mon Sep 17 00:00:00 2001
+From: Eugen <eugen252009@gmail.com>
+Date: Sat, 17 Oct 2026 10:22:50 +0200
+Subject: [PATCH 6/9] selftests: authority: qualify temporal delegation and
+ snapshots
+
+Record temporal alias versus independent clone, reduction/delegation/inheritance and complete saved-credential personality tests with their interpretation. Preserve EXPECTED_VALID_DELEGATION and the absence of global revocation; no runtime qualification is rerun by committing.
+---
+ Documentation/authority/temporal-semantics.md | 180 ++++++
+ .../selftests/authority/temporal_test.c       | 530 ++++++++++++++++++
+ 2 files changed, 710 insertions(+)
+ create mode 100644 Documentation/authority/temporal-semantics.md
+ create mode 100644 tools/testing/selftests/authority/temporal_test.c
+
+diff --git a/Documentation/authority/temporal-semantics.md b/Documentation/authority/temporal-semantics.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..c62fff1639dc586564155bb306b074799b0f3d2d
+--- /dev/null
++++ b/Documentation/authority/temporal-semantics.md
+@@ -0,0 +1,180 @@
++# Temporal Authority semantics and io_uring personalities
++
++## Governing contract
++
++**A_out ⊆ A_in**
++
++For each transformation, compare the output with the effective, legitimately
++supplied and delegable inputs **at that transformation's creation point**.
++Inputs include provenance, explicit rights/scopes, source capability state,
++applicable LSM constraints and expressly authorized grants/delegations.
++Legitimate delegation does not require attenuation: preserving all legitimately
++supplied authority is valid. Every future class must demonstrate the same
++invariant with reproducible lifecycle, temporal, effective-restriction and
++concurrency tests; see [regression requirements](FUTURE-REGRESSION.md). Identity
++alone is not an input grant. An absent/unhandled class is not zero Linux power:
++it intentionally continues native authorization. A zero-right file capability
++is not the same thing as an unhandled task domain.
++
++**A later reduction of the source's Authority does not retroactively invalidate a previously legitimate independent capability.**
++
++**A historical identity or credential snapshot is not automatically equivalent to a legitimately delegated Authority capability.**
++
++T1: source A has READ|WRITE and legitimately creates independent B with both.
++T2: A reduces to READ; B still has READ|WRITE. T3: deriving C **from A** cannot
++produce WRITE. Deriving from independently owned B may still produce WRITE;
++B, not A's current task domain, is then the actual input. This is not a hidden
++ceiling or spontaneous restoration. No independently authorized grant may be
++smuggled into an attenuation operation without identifying its provenance.
++
++These rules concern the capability/context that is supplied, not an immutable
++listing of every pathname that might ever exist. Directory scopes authorize
++future descendants according to their existing object/mount semantics. Native
++DAC and LSM policy remain independently evaluated; policy changes are governed
++by their own authorization/revocation contracts, not silently frozen forever.
++
++## Independence is not descriptor numbering or necessarily deep copying
++
++| Operation | Actual ownership/sharing | Temporal check / publication point |
++|---|---|---|
++| F_GETFD_CAP | Observation of mode-derived or managed bitmap; not a grant or complete effective-LSM-permission report | Bitmap/mode read; output is a point observation, not an entitlement to later mint those bits |
++| F_RESTRICTFD_CAP | Changes the same open file description's mutable ceiling | Initial pointer cmpxchg publication or atomic AND; every dup/SCM/fork alias observes that ceiling |
++| F_CLONEFD_CAP | New struct file and private capability bitmap; saved source opener, independent subsequent offset | Source rights read supplies the ceiling; source/request/mode intersection plus independent inode/open/post-open/clone LSM checks before fd_install |
++| dup/F_DUPFD/forked FD/SCM_RIGHTS/pidfd/fixed io_uring slot | References to the same struct file, not independent attenuation state | Reference/import boundary plus applicable Linux/LSM transfer checks; later restrictions of that file propagate |
++| Mapping | Separately established VMA, not a live rights-bitmap alias | mmap/mprotect checks; existing VMAs are not retroactively revoked by file attenuation |
++| Add scope | Privileged explicit grant rooted at pinned path; new immutable Authority state | CAP_SYS_ADMIN authorization and successful credential commit; post-confinement addition remains forbidden |
++| Confine/drop scope/drop right | Replaces this task's credential/Authority snapshot; no global mutation of old snapshots | commit_creds publishes the new task state; handled/sealed monotonicity and subset checks remain |
++| fork credentials | Referenced/copied credentials retain immutable Authority; independent later per-task replacement | copy_creds/prepare_creds; parent reduction does not mutate child's earlier context |
++| execve | Ordinary credential lifecycle, FD inheritance/CLOEXEC and LSM checks | Credential commit; confined authority_cred_clear retains domain; no new file-cap rights from exec |
++| io_uring personality registration | Explicit ring-bound execution-context delegation holding a referenced complete credential, including immutable Authority | get_current_cred capture and successful xarray publication under uring_lock |
++| Personality use | Request acquires its own credential reference, subject to LSM adoption and operation checks | Serialized personality lookup/get_cred; later execution uses that captured request context |
++| Personality unregister | Removes shared ring namespace membership, not global revocation | xa_erase under uring_lock; future unresolved ID use fails; prepared requests/open FDs retain their legitimate references |
++
++The FD clone copies the initial file position; subsequent offset changes are
++independent. A source descriptor number and an imported/duplicated number are
++not evidence of independent state. Immutable objects may be physically shared
++by reference while their holders own independently valid historical contexts:
++copy-on-write replacement, not pointer inequality, establishes independence
++from later changes to the original holder.
++
++No current API implements global/object-level revocation of already issued
++capabilities. Unlink, close of one alias, local domain reduction and personality
++unregister must not be relabeled global revocation. A future revocation design
++would need explicit target/lifetime/ordering rules and separate tests. The
++planned `--no-delegation` flag is **not implemented**; no test assumes it exists.
++
++## Precisely recognizing personality registration as delegation
++
++The selected contract recognizes **successful explicit IORING_REGISTER_PERSONALITY**
++as creation of a ring-bound execution-context capability from the registering
++subject's current legitimate context. This is not a blanket rule that any
++copied identity or arbitrary saved pointer becomes Authority. Required evidence
++is actual complete-context capture, valid ownership, lifetime retention, bounded
++use and independent restrictions. The ordinary Linux registration mechanism
++already implements those properties in this prototype; no new UAPI or Core
++feature is introduced by recognizing it.
++
++The effective handle is access to the ring plus its registered ID. IDs are not
++secret/global capabilities. Registration into an already-shared ring delegates
++the context to other eligible ring holders, subject to ring restrictions and
++LSM adoption checks. Applications must include rings/personalities in capability
++hygiene. Removing pathname scopes does not revoke those earlier delegations.
++A launcher needing a smaller total authority must not retain or accept a broader
++registered context/broker unintentionally. This does not establish a universal
++process sandbox or add process/IPC/network authority classes.
++
++### Source-level provenance answers
++
++1. `io_uring/register.c:io_register_personality()` calls `get_current_cred()`
++   and publishes that pointer with `xa_alloc_cyclic`; allocation failure puts
++   the reference. It captures the **registrar**, not the ring creator.
++2. There is no new allocated `struct authority` at registration. The logical
++   execution-context capability is independently owned by the ring reference;
++   it references immutable state, not the source task's future mutable slot.
++3. It is not UID/GID-only capture. `struct cred` contains `authority` plus native
++   credentials/security context; `prepare_creds()` calls `authority_get()` and
++   `put_cred_rcu()` calls `authority_put()`. Holding the credential consequently
++   holds Authority, scopes and their path references alive.
++4. Confinement/scope reduction prepare and commit replacement credentials and
++   cloned Authority. They do not edit the personality's old context.
++5. Registration restrictions are the implemented ring access/registration
++   policy and issuer rules, allocation checks and any existing independent
++   Linux restrictions. There is no extra Authority no-delegation rule. Privileged
++   scope construction remains separately authorized, never implied by an ID.
++6. At SQE preparation, `io_init_req()` resolves the personality, gets a request
++   reference and invokes `security_uring_override_creds()`. SELinux checks
++   IO_URING__OVERRIDE_CREDS; AppArmor checks the corresponding mediated class.
++7. `__io_issue_sqe()` overrides **subjective** credentials for the operation and
++   reverts them afterward. The objective task domain remains confined. Ordinary
++   open/namei/Authority checks execute with the selected saved subject; the old
++   unhandled context is not a zero-right context. Defaults do not inherit the
++   ring opener's broader credentials: async preparation captures the issuer.
++8. Registration after confinement or reduction captures the new bounded state.
++   Retained UID 0 cannot restore omitted handled rights or widen object scope.
++   A prior scoped READ-only personality cannot perform WRITE or open outside
++   its captured scope even if the source later loses all current scope rights.
++9. LSM semantics are not universally identical. Captured Landlock restrictions
++   travel with its referenced credential; relevant current SELinux/AppArmor
++   adoption vetoes remain active. Saved-state file denials remain active during
++   issue. Policy reload/global revocation remains the independent LSM's contract.
++10. `io_unregister_personality()` erases and puts the ring's reference; request
++    cleanup puts its own reference. `io_ring_ctx_wait_and_kill()` walks and
++    unregisters remaining entries under uring_lock, then asynchronously tears
++    down the ring. Aliases keep the same ring alive. Unregister is not evidence
++    of a leak when an already prepared request legitimately retains a reference.
++
++## Concurrency and atomicity boundaries
++
++Personality registration/unregister, request initialization and relevant issue
++paths serialize the ring registry with `ctx->uring_lock`. A request lookup that
++successfully acquires its reference before erasure remains valid afterward;
++future lookup of that now-absent ID fails. IDs may eventually be reused, but a
++new ID binding uses the new registrant's context, not stale authority.
++
++A task cannot concurrently execute its own registration and credential-changing
++syscall; other threads are distinct subjects. Current confinement additionally
++rejects a live multithreaded task with EBUSY. The test deliberately races the
++attempt, confirms no state change, and enters after the peer exits. A peer that
++already inherited an old valid context may legitimately register **its own**
++context; it is not minting from another task's later reduced state.
++
++FD reduction linearizes at capability-pointer publication/atomic AND. Clone's
++bitmap ceiling linearizes at the source-rights observation: a clone overlapping
++reduction may retain an earlier valid snapshot; one started after completed
++reduction must not recover dropped bits. Independent LSM/open checks still
++apply before publication. There is no claimed single global atomic transaction
++covering concurrent LSM policy reloads, namespace changes and every cache;
++each independent layer's synchronization/revocation contract remains relevant.
++
++## Qualification and classification
++
++**EXPECTED_VALID_DELEGATION** is the classification of the reported pre-confinement
++personality finding. It is supported by both complete-context ownership in the
++source and explicit scoped RW/READ/zero tests, not inferred merely from a
++saved UID or from native Linux behavior. The prior unscored observation is
++superseded only as a contract ambiguity; its raw behavior/logs are preserved.
++
++The focused test distinguishes independent FD clones, shared file aliases,
++per-task COW contexts, native credential delegation, source attenuation,
++asynchronous issue, prepared-request lifetime and unimplemented revocation.
++Dedicated enforcing LSM tests check authorized adoption, current adoption veto,
++and a saved file-denial state. AppArmor needs an explicitly selected policy ABI
++containing io_uring mediation; the initial default-ABI failure remains recorded,
++not converted into a kernel pass by changing its assertion.
++
++No production code or credential rebasing changed. Focused results and hashes
++are in `/tmp/authority-v1-final/temporal-authority/REPORT.md`. This resolves the
++personality temporal-semantics blocker within the stated configurations. At that
++temporal checkpoint whole-v1 remained NO-GO; the subsequent source-based KCSAN
++attribution decision is CONDITIONAL GO under the limits retained in the
++[frozen experimental baseline](FILESYSTEM-V1-BASELINE.md). This does not claim
++the underlying races are harmless or the kernel sanitizer-clean.
++
++## Extension boundary
++
++The same **A_out ⊆ A_in** rule governs future supported transformations/classes.
++Restricted kernel extensions remain long-term work: native kernel modules run
++inside the privileged kernel TCB. Meaningful restriction of untrusted native
++code needs execution/memory isolation not supplied by the current Core. No
++restricted-module, Rescue Authority, global sealing/revocation or permission
++CLI implementation is introduced here.
+diff --git a/tools/testing/selftests/authority/temporal_test.c b/tools/testing/selftests/authority/temporal_test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..6d93238d75d22e1e8ba2984f2479aafea674c97f
+--- /dev/null
++++ b/tools/testing/selftests/authority/temporal_test.c
+@@ -0,0 +1,530 @@
++// SPDX-License-Identifier: GPL-2.0
++#define _GNU_SOURCE
++#include <errno.h>
++#include <fcntl.h>
++#define _ASM_GENERIC_FCNTL_H
++#define F_LINUX_SPECIFIC_BASE 1024
++#include <linux/fcntl.h>
++#include <linux/io_uring.h>
++#include <linux/landlock.h>
++#include <linux/prctl.h>
++#include <poll.h>
++#include <pthread.h>
++#include <sched.h>
++#include <signal.h>
++#include <stdatomic.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <sys/prctl.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/syscall.h>
++#include <sys/wait.h>
++#include <unistd.h>
++#include "../kselftest.h"
++
++#define CHECK(c) do { if (!(c)) { \
++ dprintf(2, "# %s:%d %s errno=%d\n", __func__, __LINE__, #c, errno); \
++ return 1; } } while (0)
++
++static int api, ll_abi, rootfd;
++static char directory[128], path[160], outside[160];
++static const char *self;
++
++struct ring {
++ int fd;
++ struct io_uring_params p;
++ void *sq, *cq;
++ struct io_uring_sqe *sqes;
++ size_t ss, cs, es;
++};
++
++static int capop(int fd, int op, unsigned char bits)
++{
++ union { uint64_t align; unsigned char data[sizeof(struct fd_cap_request) + 1]; } u = {};
++ struct fd_cap_request *r = (void *)u.data;
++ int rc;
++ r->size = sizeof(u.data);
++ r->version = FD_CAP_VERSION_1;
++ r->rights[0] = bits;
++ rc = fcntl(fd, op, r);
++ return !rc && op == F_GETFD_CAP ? r->rights[0] : rc;
++}
++
++static int confine(void)
++{
++ union { uint64_t align; unsigned char data[sizeof(struct pr_capauth_confine) + 1]; } u = {};
++ struct pr_capauth_confine *r = (void *)u.data;
++ r->size = sizeof(u.data);
++ r->version = PR_CAPAUTH_CONFINE_VERSION_1;
++ r->handled[0] = 0x18;
++ return prctl(PR_CAPAUTH, PR_CAPAUTH_CONFINE, (unsigned long)r, 0UL, 0UL);
++}
++
++static int scope(int right)
++{
++ return prctl(PR_CAPAUTH, PR_CAPAUTH_ADD_FS_SCOPE,
++              (unsigned long)rootfd, (unsigned long)right, 0UL);
++}
++
++static int drop_scope(int right)
++{
++ return prctl(PR_CAPAUTH, PR_CAPAUTH_DROP_FS_SCOPE_RIGHT,
++              (unsigned long)rootfd, (unsigned long)right, 0UL);
++}
++
++static int fixture(void)
++{
++ int fd;
++ strcpy(directory, "/tmp/temporal-authority.XXXXXX");
++ CHECK(mkdtemp(directory) && !chmod(directory, 0755));
++ snprintf(path, sizeof(path), "%s/file", directory);
++ snprintf(outside, sizeof(outside), "%s-outside", directory);
++ fd = open(path, O_CREAT | O_RDWR, 0600);
++ CHECK(fd >= 0 && write(fd, "data", 4) == 4);
++ close(fd);
++ fd = open(outside, O_CREAT | O_RDWR, 0600);
++ CHECK(fd >= 0 && write(fd, "other", 5) == 5);
++ close(fd);
++ rootfd = open(directory, O_PATH | O_DIRECTORY);
++ CHECK(rootfd >= 0);
++ return 0;
++}
++
++static int ring_open(struct ring *r)
++{
++ memset(r, 0, sizeof(*r));
++ r->fd = syscall(SYS_io_uring_setup, 8, &r->p);
++ CHECK(r->fd >= 0);
++ r->ss = r->p.sq_off.array + r->p.sq_entries * sizeof(unsigned);
++ r->cs = r->p.cq_off.cqes + r->p.cq_entries * sizeof(struct io_uring_cqe);
++ if (r->p.features & IORING_FEAT_SINGLE_MMAP) {
++  if (r->cs > r->ss) r->ss = r->cs;
++  r->sq = mmap(NULL, r->ss, PROT_READ | PROT_WRITE, MAP_SHARED, r->fd, IORING_OFF_SQ_RING);
++  r->cq = r->sq;
++ } else {
++  r->sq = mmap(NULL, r->ss, PROT_READ | PROT_WRITE, MAP_SHARED, r->fd, IORING_OFF_SQ_RING);
++  r->cq = mmap(NULL, r->cs, PROT_READ | PROT_WRITE, MAP_SHARED, r->fd, IORING_OFF_CQ_RING);
++ }
++ CHECK(r->sq != MAP_FAILED && r->cq != MAP_FAILED);
++ r->es = r->p.sq_entries * sizeof(struct io_uring_sqe);
++ r->sqes = mmap(NULL, r->es, PROT_READ | PROT_WRITE, MAP_SHARED, r->fd, IORING_OFF_SQES);
++ CHECK(r->sqes != MAP_FAILED);
++ return 0;
++}
++
++static void ring_unmap(struct ring *r)
++{
++ munmap(r->sqes, r->es);
++ munmap(r->sq, r->ss);
++ if (!(r->p.features & IORING_FEAT_SINGLE_MMAP)) munmap(r->cq, r->cs);
++}
++
++static void ring_close(struct ring *r)
++{
++ close(r->fd);
++ ring_unmap(r);
++}
++
++static int personality(struct ring *r)
++{
++ return syscall(SYS_io_uring_register, r->fd, IORING_REGISTER_PERSONALITY, NULL, 0);
++}
++
++static int unpersonality(struct ring *r, unsigned id)
++{
++ return syscall(SYS_io_uring_register, r->fd, IORING_UNREGISTER_PERSONALITY, NULL, id);
++}
++
++static struct io_uring_sqe *prepare(struct ring *r, unsigned op, int fd, int id, unsigned flags)
++{
++ unsigned *tail = r->sq + r->p.sq_off.tail;
++ unsigned *mask = r->sq + r->p.sq_off.ring_mask;
++ unsigned *array = r->sq + r->p.sq_off.array;
++ unsigned t = *tail, index = t & *mask;
++ struct io_uring_sqe *s = &r->sqes[index];
++ memset(s, 0, sizeof(*s));
++ s->opcode = op;
++ s->fd = fd;
++ s->personality = id;
++ s->flags = flags;
++ array[index] = index;
++ /* Only this userspace thread produces SQEs; kernel consumption starts at enter. */
++ __atomic_store_n(tail, t + 1, __ATOMIC_RELEASE);
++ return s;
++}
++
++static int submit(struct ring *r, unsigned nr, unsigned minimum)
++{
++ return syscall(SYS_io_uring_enter, r->fd, nr, minimum,
++                minimum ? IORING_ENTER_GETEVENTS : 0, NULL, 0);
++}
++
++static int completion(struct ring *r, unsigned long long *tag)
++{
++ unsigned *head = r->cq + r->p.cq_off.head;
++ unsigned *tail = r->cq + r->p.cq_off.tail;
++ unsigned *mask = r->cq + r->p.cq_off.ring_mask;
++ struct io_uring_cqe *cq = r->cq + r->p.cq_off.cqes;
++ unsigned h = *head;
++ int result;
++ if (h == __atomic_load_n(tail, __ATOMIC_ACQUIRE)) {
++  if (submit(r, 0, 1) < 0) return -10000 - errno;
++ }
++ if (h == __atomic_load_n(tail, __ATOMIC_ACQUIRE)) return -20000;
++ result = cq[h & *mask].res;
++ if (tag) *tag = cq[h & *mask].user_data;
++ __atomic_store_n(head, h + 1, __ATOMIC_RELEASE);
++ return result;
++}
++
++static int acquire(struct ring *r, int id, const char *name, int flags, int asynchronous)
++{
++ struct io_uring_sqe *s = prepare(r, IORING_OP_OPENAT, AT_FDCWD, id,
++                                 asynchronous ? IOSQE_ASYNC : 0);
++ s->addr = (uintptr_t)name;
++ s->open_flags = flags;
++ if (submit(r, 1, 1) < 0) return -10000 - errno;
++ return completion(r, NULL);
++}
++
++static int readable(int fd)
++{
++ char c;
++ CHECK(fd >= 0 && pread(fd, &c, 1, 0) == 1 && c == 'd');
++ close(fd);
++ return 0;
++}
++
++static int denied(struct ring *r, int id, const char *name, int flags, int asynchronous)
++{
++ int rc = acquire(r, id, name, flags, asynchronous);
++ printf("# denied id=%d flags=%d async=%d result=%d\n", id, flags, asynchronous, rc);
++ CHECK(rc == -EACCES);
++ return 0;
++}
++
++static int fd_timeline(void)
++{
++ int a, alias, b, c, d, z;
++ char byte;
++ CHECK(!fixture());
++ a = open(path, O_RDWR); CHECK(a >= 0);
++ alias = dup(a); CHECK(alias >= 0);
++ CHECK(lseek(a, 1, SEEK_SET) == 1);
++ b = capop(a, F_CLONEFD_CAP, 3); CHECK(b >= 0);
++ CHECK(lseek(b, 0, SEEK_CUR) == 1 && lseek(b, 0, SEEK_SET) == 0);
++ CHECK(lseek(a, 0, SEEK_CUR) == 1);
++ CHECK(!capop(a, F_RESTRICTFD_CAP, 1));
++ CHECK(capop(alias, F_GETFD_CAP, 0) == 1 && capop(b, F_GETFD_CAP, 0) == 3);
++ c = capop(a, F_CLONEFD_CAP, 3); CHECK(c >= 0 && capop(c, F_GETFD_CAP, 0) == 1);
++ errno = 0; CHECK(pwrite(c, "x", 1, 0) == -1 && errno == EBADF);
++ CHECK(!capop(a, F_RESTRICTFD_CAP, 0));
++ z = capop(a, F_CLONEFD_CAP, 3); CHECK(z >= 0 && capop(z, F_GETFD_CAP, 0) == 0);
++ errno = 0; CHECK(pread(z, &byte, 1, 0) == -1 && errno == EBADF);
++ CHECK(pwrite(b, "d", 1, 0) == 1);
++ d = capop(b, F_CLONEFD_CAP, 3); CHECK(d >= 0 && capop(d, F_GETFD_CAP, 0) == 3);
++ CHECK(pwrite(d, "d", 1, 0) == 1);
++ CHECK(!unlink(path)); close(a); close(alias);
++ CHECK(pread(b, &byte, 1, 0) == 1 && byte == 'd');
++ return 0;
++}
++
++static int shared_scm(void)
++{
++ int fd, pair[2], duplicate, received = -1;
++ char byte = 'x', controls[CMSG_SPACE(sizeof(int))];
++ struct iovec io = { .iov_base = &byte, .iov_len = 1 };
++ struct msghdr msg = { .msg_iov = &io, .msg_iovlen = 1,
++                       .msg_control = controls, .msg_controllen = sizeof(controls) };
++ struct cmsghdr *c;
++ CHECK(!fixture()); fd = open(path, O_RDWR); CHECK(fd >= 0);
++ duplicate = fcntl(fd, F_DUPFD_CLOEXEC, 0); CHECK(duplicate >= 0);
++ CHECK(!socketpair(AF_UNIX, SOCK_DGRAM, 0, pair));
++ memset(controls, 0, sizeof(controls)); c = CMSG_FIRSTHDR(&msg);
++ c->cmsg_level = SOL_SOCKET; c->cmsg_type = SCM_RIGHTS; c->cmsg_len = CMSG_LEN(sizeof(fd));
++ memcpy(CMSG_DATA(c), &fd, sizeof(fd)); CHECK(sendmsg(pair[0], &msg, 0) == 1);
++ memset(controls, 0, sizeof(controls)); CHECK(recvmsg(pair[1], &msg, 0) == 1);
++ c = CMSG_FIRSTHDR(&msg); CHECK(c && c->cmsg_type == SCM_RIGHTS);
++ memcpy(&received, CMSG_DATA(c), sizeof(received)); CHECK(received >= 0);
++ CHECK(!capop(duplicate, F_RESTRICTFD_CAP, 1));
++ CHECK(capop(received, F_GETFD_CAP, 0) == 1);
++ errno = 0; CHECK(pwrite(received, "x", 1, 0) == -1 && errno == EBADF);
++ CHECK(!capop(received, F_RESTRICTFD_CAP, 0)); CHECK(capop(fd, F_GETFD_CAP, 0) == 0);
++ return 0;
++}
++
++static int fork_context(void)
++{
++ int pipes[2], status; pid_t child; char c;
++ CHECK(!fixture() && !scope(PR_CAPAUTH_FS_READ_FILE) && !confine() && !pipe(pipes));
++ child = fork(); CHECK(child >= 0);
++ if (!child) {
++  close(pipes[1]); if (read(pipes[0], &c, 1) != 1) _exit(1);
++  int fd = open(path, O_RDONLY); _exit(fd < 0);
++ }
++ close(pipes[0]); CHECK(!drop_scope(PR_CAPAUTH_FS_READ_FILE));
++ errno = 0; CHECK(open(path, O_RDONLY) == -1 && errno == EACCES);
++ CHECK(write(pipes[1], "s", 1) == 1);
++ CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
++ return 0;
++}
++
++static int exec_context(void)
++{
++ int fd, b, status; pid_t child; char number[32];
++ CHECK(!fixture()); fd = open(path, O_RDWR); CHECK(fd >= 0);
++ b = capop(fd, F_CLONEFD_CAP, 3); CHECK(b >= 0);
++ CHECK(!capop(fd, F_RESTRICTFD_CAP, 0) && !confine());
++ snprintf(number, sizeof(number), "%d", b);
++ child = fork(); CHECK(child >= 0);
++ if (!child) { execl(self, self, "--exec-child", number, path, NULL); _exit(127); }
++ CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
++ return 0;
++}
++
++static int native_identity(void)
++{
++ struct ring r; int id, fd;
++ CHECK(!fixture() && !ring_open(&r)); id = personality(&r); CHECK(id > 0);
++ CHECK(!setgid(1000) && !setuid(1000));
++ CHECK(!denied(&r, 0, path, O_RDONLY, 0));
++ fd = acquire(&r, id, path, O_RDONLY, 0); CHECK(!readable(fd));
++ CHECK(geteuid() == 1000);
++ CHECK(!unpersonality(&r, id)); ring_close(&r); return 0;
++}
++
++static int preconfined_personality(void)
++{
++ struct ring r; int old, later, fd;
++ CHECK(!fixture() && !ring_open(&r)); old = personality(&r); CHECK(old > 0);
++ CHECK(!confine()); later = personality(&r); CHECK(later > 0);
++ CHECK(!denied(&r, 0, path, O_RDONLY, 0) && !denied(&r, later, path, O_RDONLY, 0));
++ fd = acquire(&r, old, path, O_RDWR, 0);
++ CHECK(fd >= 0 && pwrite(fd, "d", 1, 0) == 1 && !readable(fd));
++ CHECK(prctl(PR_CAPAUTH, PR_CAPAUTH_GET_CONFINED, 0UL, 0UL, 0UL) == 1);
++ CHECK(!unpersonality(&r, old) && !unpersonality(&r, later)); ring_close(&r); return 0;
++}
++
++static int scoped_personalities(void)
++{
++ struct ring r; int both, read_only, zero, fd;
++ CHECK(!fixture() && !ring_open(&r));
++ CHECK(!scope(PR_CAPAUTH_FS_READ_FILE) && !scope(PR_CAPAUTH_FS_WRITE_FILE) && !confine());
++ both = personality(&r); CHECK(both > 0);
++ CHECK(!drop_scope(PR_CAPAUTH_FS_WRITE_FILE)); read_only = personality(&r); CHECK(read_only > 0);
++ CHECK(!drop_scope(PR_CAPAUTH_FS_READ_FILE)); zero = personality(&r); CHECK(zero > 0);
++ CHECK(!denied(&r, 0, path, O_RDONLY, 0) && !denied(&r, zero, path, O_RDONLY, 0));
++ CHECK(!readable(acquire(&r, read_only, path, O_RDONLY, 0)));
++ CHECK(!denied(&r, read_only, path, O_WRONLY, 0) && !denied(&r, read_only, path, O_RDWR, 0));
++ fd = acquire(&r, both, path, O_RDWR, 0); CHECK(fd >= 0 && pwrite(fd, "d", 1, 0) == 1); close(fd);
++ CHECK(!denied(&r, both, outside, O_RDONLY, 0));
++ CHECK(!denied(&r, read_only, outside, O_RDONLY, 0));
++ CHECK(!unpersonality(&r, both) && !unpersonality(&r, read_only) && !unpersonality(&r, zero));
++ ring_close(&r); return 0;
++}
++
++static int authority_not_identity(void)
++{
++ struct ring r; int id;
++ CHECK(!fixture() && !ring_open(&r));
++ CHECK(!scope(PR_CAPAUTH_FS_READ_FILE) && !confine()); id = personality(&r); CHECK(id > 0);
++ CHECK(!drop_scope(PR_CAPAUTH_FS_READ_FILE) && !setgid(1000) && !setuid(1000));
++ CHECK(!readable(acquire(&r, id, path, O_RDONLY, 0)));
++ CHECK(!denied(&r, id, path, O_WRONLY, 0) && !denied(&r, id, outside, O_RDONLY, 0));
++ CHECK(!denied(&r, 0, path, O_RDONLY, 0));
++ CHECK(!unpersonality(&r, id)); ring_close(&r); return 0;
++}
++
++static int asynchronous(void)
++{
++ struct ring r; int id;
++ CHECK(!fixture() && !ring_open(&r));
++ CHECK(!scope(PR_CAPAUTH_FS_READ_FILE) && !confine()); id = personality(&r); CHECK(id > 0);
++ CHECK(!drop_scope(PR_CAPAUTH_FS_READ_FILE));
++ CHECK(!denied(&r, 0, path, O_RDONLY, 1));
++ CHECK(!readable(acquire(&r, id, path, O_RDONLY, 1)));
++ CHECK(!denied(&r, id, path, O_WRONLY, 1) && !denied(&r, id, outside, O_RDONLY, 1));
++ CHECK(!unpersonality(&r, id)); ring_close(&r); return 0;
++}
++
++static int ring_alias(void)
++{
++ struct ring r; int id, alias, result, fd;
++ CHECK(!fixture() && !ring_open(&r)); id = personality(&r); CHECK(id > 0);
++ alias = dup(r.fd); CHECK(alias >= 0);
++ fd = acquire(&r, id, path, O_RDONLY, 0); CHECK(fd >= 0);
++ CHECK(!syscall(SYS_io_uring_register, alias, IORING_UNREGISTER_PERSONALITY, NULL, id));
++ result = acquire(&r, id, path, O_RDONLY, 0); CHECK(result == -EINVAL);
++ CHECK(!readable(fd)); close(alias); ring_close(&r); return 0;
++}
++
++static int inflight_unregister(void)
++{
++ struct ring r; struct io_uring_sqe *s; int id, pipes[2], opened = -1, poll_done = 0;
++ unsigned long long tag;
++ CHECK(!fixture() && !ring_open(&r) && !pipe(pipes));
++ CHECK(!scope(PR_CAPAUTH_FS_READ_FILE) && !confine()); id = personality(&r); CHECK(id > 0);
++ CHECK(!drop_scope(PR_CAPAUTH_FS_READ_FILE));
++ s = prepare(&r, IORING_OP_POLL_ADD, pipes[0], 0, 0); s->poll_events = POLLIN; s->user_data = 1;
++ s = prepare(&r, IORING_OP_OPENAT, AT_FDCWD, id, IOSQE_IO_DRAIN);
++ s->addr = (uintptr_t)path; s->user_data = 2;
++ CHECK(submit(&r, 2, 0) == 2);
++ CHECK(!unpersonality(&r, id));
++ CHECK(write(pipes[1], "s", 1) == 1);
++ for (int i = 0; i < 2; i++) {
++  int result = completion(&r, &tag);
++  if (tag == 1) { CHECK(result & POLLIN); poll_done = 1; }
++  else { CHECK(tag == 2 && result >= 0); opened = result; }
++ }
++ CHECK(poll_done && !readable(opened));
++ CHECK(acquire(&r, id, path, O_RDONLY, 0) == -EINVAL);
++ close(pipes[0]); close(pipes[1]); ring_close(&r); return 0;
++}
++
++static int teardown(void)
++{
++ struct ring r; int id, old, result;
++ CHECK(!fixture());
++ for (int n = 0; n < 64; n++) {
++  CHECK(!ring_open(&r)); id = personality(&r); CHECK(id > 0);
++  if (n & 1) CHECK(!unpersonality(&r, id));
++  ring_close(&r);
++ }
++ CHECK(!ring_open(&r)); old = personality(&r); CHECK(old > 0); ring_close(&r);
++ CHECK(!confine() && !ring_open(&r));
++ result = acquire(&r, old, path, O_RDONLY, 0); CHECK(result == -EINVAL);
++ id = personality(&r); CHECK(id > 0 && !denied(&r, id, path, O_RDONLY, 0));
++ CHECK(!unpersonality(&r, id)); ring_close(&r); return 0;
++}
++
++struct register_thread { struct ring *ring; atomic_int ready, release; int id; };
++static void *register_worker(void *arg)
++{
++ struct register_thread *t = arg;
++ t->id = personality(t->ring);
++ atomic_store_explicit(&t->ready, 1, memory_order_release);
++ while (!atomic_load_explicit(&t->release, memory_order_acquire)) sched_yield();
++ return NULL;
++}
++
++static int registration_confinement(void)
++{
++ struct ring r; struct register_thread t = {}; pthread_t thread; int later, result;
++ CHECK(!fixture() && !ring_open(&r)); t.ring = &r;
++ CHECK(!pthread_create(&thread, NULL, register_worker, &t));
++ while (!atomic_load_explicit(&t.ready, memory_order_acquire)) sched_yield();
++ errno = 0; CHECK(confine() == -1 && errno == EBUSY);
++ CHECK(prctl(PR_CAPAUTH, PR_CAPAUTH_GET_CONFINED, 0UL, 0UL, 0UL) == 0);
++ atomic_store_explicit(&t.release, 1, memory_order_release);
++ CHECK(!pthread_join(thread, NULL) && t.id > 0);
++ for (int i = 0; ; i++) {
++  result = confine();
++  if (!result) break;
++  CHECK(errno == EBUSY && i < 100); usleep(1000);
++ }
++ later = personality(&r); CHECK(later > 0);
++ CHECK(!readable(acquire(&r, t.id, path, O_RDONLY, 0)) && !denied(&r, later, path, O_RDONLY, 0));
++ CHECK(!unpersonality(&r, later) && !unpersonality(&r, t.id)); ring_close(&r); return 0;
++}
++
++struct clone_thread { int fd; atomic_int ready, go; int clone; };
++static void *clone_worker(void *arg)
++{
++ struct clone_thread *t = arg;
++ atomic_store_explicit(&t->ready, 1, memory_order_release);
++ while (!atomic_load_explicit(&t->go, memory_order_acquire)) sched_yield();
++ t->clone = capop(t->fd, F_CLONEFD_CAP, 3);
++ return NULL;
++}
++
++static int concurrent_clone(void)
++{
++ CHECK(!fixture());
++ for (int n = 0; n < 64; n++) {
++  struct clone_thread t = {}; pthread_t thread; int rights, late;
++  t.fd = open(path, O_RDWR); CHECK(t.fd >= 0);
++  CHECK(!pthread_create(&thread, NULL, clone_worker, &t));
++  while (!atomic_load_explicit(&t.ready, memory_order_acquire)) sched_yield();
++  atomic_store_explicit(&t.go, 1, memory_order_release);
++  CHECK(!capop(t.fd, F_RESTRICTFD_CAP, 1) && !pthread_join(thread, NULL));
++  CHECK(t.clone >= 0); rights = capop(t.clone, F_GETFD_CAP, 0); CHECK(rights == 1 || rights == 3);
++  late = capop(t.fd, F_CLONEFD_CAP, 3); CHECK(late >= 0 && capop(late, F_GETFD_CAP, 0) == 1);
++  close(late); close(t.clone); close(t.fd);
++ }
++ return 0;
++}
++
++static int landlock_snapshot(void)
++{
++ struct ring r; int rules, id;
++ struct landlock_ruleset_attr ruleset = { .handled_access_fs =
++  LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_TRUNCATE };
++ struct landlock_path_beneath_attr rule = {};
++ CHECK(!fixture() && !ring_open(&r));
++ CHECK(!scope(PR_CAPAUTH_FS_READ_FILE) && !scope(PR_CAPAUTH_FS_WRITE_FILE) && !confine());
++ rules = syscall(SYS_landlock_create_ruleset, &ruleset, sizeof(ruleset), 0); CHECK(rules >= 0);
++ rule.allowed_access = LANDLOCK_ACCESS_FS_READ_FILE; rule.parent_fd = rootfd;
++ CHECK(!syscall(SYS_landlock_add_rule, rules, LANDLOCK_RULE_PATH_BENEATH, &rule, 0));
++ CHECK(!prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
++ CHECK(!syscall(SYS_landlock_restrict_self, rules, 0)); close(rules);
++ id = personality(&r); CHECK(id > 0);
++ CHECK(!drop_scope(PR_CAPAUTH_FS_READ_FILE) && !drop_scope(PR_CAPAUTH_FS_WRITE_FILE));
++ CHECK(!readable(acquire(&r, id, path, O_RDONLY, 0)));
++ CHECK(!denied(&r, id, path, O_WRONLY, 0) && !denied(&r, id, path, O_RDWR, 1));
++ CHECK(!denied(&r, id, outside, O_RDONLY, 0));
++ CHECK(!unpersonality(&r, id)); ring_close(&r); return 0;
++}
++
++int main(int argc, char **argv)
++{
++ const struct { const char *name; int (*run)(void); int needs_api, needs_ll; } cases[] = {
++  { "independent FD T1/T2/T3, zero source, independent re-delegation", fd_timeline, 1, 0 },
++  { "dup and SCM_RIGHTS alias mutable attenuation", shared_scm, 1, 0 },
++  { "fork retains immutable scoped context after parent reduction", fork_context, 1, 0 },
++  { "exec preserves domain and legitimate independently held capability", exec_context, 1, 0 },
++  { "native explicit credential personality survives identity reduction", native_identity, 0, 0 },
++  { "pre-confinement registration retains input; post-confinement cannot mint it", preconfined_personality, 1, 0 },
++  { "scoped RW/READ/zero handled-data snapshots and outside-scope ceiling", scoped_personalities, 1, 0 },
++  { "retained root identity does not erase captured READ-only Authority", authority_not_identity, 1, 0 },
++  { "async issuer/default and saved scoped principal remain distinct", asynchronous, 1, 0 },
++  { "ring dup aliases registration; unregister is not FD revocation", ring_alias, 0, 0 },
++  { "prepared request retains authority after unregister; future lookup fails", inflight_unregister, 1, 0 },
++  { "bounded registration/unregister/ring destruction and numeric reuse", teardown, 1, 0 },
++  { "concurrent registration/confinement orders through EBUSY", registration_confinement, 1, 0 },
++  { "concurrent clone/attenuation respects snapshot and completed reduction", concurrent_clone, 1, 0 },
++  { "captured Landlock restrictions bound effective authority", landlock_snapshot, 1, 1 },
++ };
++ int result, status; pid_t child;
++ setvbuf(stdout, NULL, _IONBF, 0);
++ if (argc == 4 && !strcmp(argv[1], "--exec-child")) {
++  int fd = atoi(argv[2]);
++  CHECK(prctl(PR_CAPAUTH, PR_CAPAUTH_GET_CONFINED, 0UL, 0UL, 0UL) == 1);
++  errno = 0; CHECK(open(argv[3], O_RDONLY) == -1 && errno == EACCES);
++  CHECK(capop(fd, F_GETFD_CAP, 0) == 3 && pwrite(fd, "d", 1, 0) == 1);
++  return 0;
++ }
++ ksft_print_header();
++ if (geteuid()) ksft_exit_skip("requires root in an isolated qualification guest\n");
++ self = realpath(argv[0], NULL); CHECK(self);
++ errno = 0; result = prctl(PR_CAPAUTH, PR_CAPAUTH_GET_CONFINED, 0UL, 0UL, 0UL);
++ if (result == -1 && errno != EINVAL) ksft_exit_fail_msg("Authority query error %d\n", errno);
++ if (result > 0) ksft_exit_fail_msg("requires initially unconfined fixture\n");
++ api = result == 0;
++ ll_abi = syscall(SYS_landlock_create_ruleset, NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
++ ksft_set_plan(sizeof(cases) / sizeof(cases[0]) + 1);
++ for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
++  if (cases[i].needs_api && !api) { ksft_test_result_skip("%s (API unavailable)\n", cases[i].name); continue; }
++  if (cases[i].needs_ll && ll_abi < 3) { ksft_test_result_skip("%s (Landlock ABI < 3)\n", cases[i].name); continue; }
++  child = fork(); CHECK(child >= 0);
++  if (!child) { alarm(30); _exit(cases[i].run()); }
++  CHECK(waitpid(child, &status, 0) == child);
++  ksft_test_result(WIFEXITED(status) && !WEXITSTATUS(status), "%s\n", cases[i].name);
++ }
++ ksft_test_result_skip("global/object revocation: no such implemented contract/API; unlink/unregister are tested separately\n");
++ free((void *)self);
++ ksft_finished();
++}

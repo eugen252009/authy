@@ -1,0 +1,15 @@
+tree f8899e047f705d5e822efd07eff2cadab43099c1
+parent 4099754d22849c1db34438b66c0296ed57581d0f
+author Eugen <eugen252009@gmail.com> 1792225367 +0200
+committer Eugen <eugen252009@gmail.com> 1792225367 +0200
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ iHUEABYKAB0WIQSvDGBPSGcm39TS7zfViIyBtkfWSAUCatMwVwAKCRDViIyBtkfW
+ SJtcAQDs55PYOubd+6Rr6JxUQa0qKCbVuBUDG//DcgLN0P56AwD/QaLHX+njGl3t
+ q231Zr60vJYbEOZ/2MSoT2t+jQ9O1Qo=
+ =XJWq
+ -----END PGP SIGNATURE-----
+
+authority: enforce scoped filesystem operations through VFS
+
+Expose the existing versioned experimental prctl constructor/reduction operations and implement scoped DAC/path, data/namespace checks and truncate/open/handle/fanotify establishment guards. These depend on Core and file-capability helpers from the preceding commits. Preserve existing semantics and native/LSM checks without a new Kconfig switch. This commit also completes the existing ftruncate/fallocate bearer guards alongside path-open/truncate integration. Intermediate series states are not independently qualified.

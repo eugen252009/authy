@@ -1,0 +1,2061 @@
+From 81dc7bbeb81556582c69406024dfad9691700346 Mon Sep 17 00:00:00 2001
+From: Eugen <eugen252009@gmail.com>
+Date: Sat, 17 Oct 2026 10:22:48 +0200
+Subject: [PATCH 4/9] selftests: authority: cover filesystem lifecycle and
+ acquisition
+
+Record the qualified core/filesystem, idmapped, callback, acquisition, DAC-FD and handle regression sources. Registration and runner arrive after all referenced test sources are present.
+---
+ .../selftests/authority/authority_test.c      | 549 +++++++++++++
+ .../selftests/authority/callback_test.c       | 125 +++
+ .../testing/selftests/authority/dac_fd_test.c | 126 +++
+ .../selftests/authority/establishment_test.c  | 148 ++++
+ .../testing/selftests/authority/handle_test.c |  67 ++
+ .../selftests/authority/idmapped_test.c       | 205 +++++
+ .../selftests/authority/qualification_test.c  | 775 ++++++++++++++++++
+ 7 files changed, 1995 insertions(+)
+ create mode 100644 tools/testing/selftests/authority/authority_test.c
+ create mode 100644 tools/testing/selftests/authority/callback_test.c
+ create mode 100644 tools/testing/selftests/authority/dac_fd_test.c
+ create mode 100644 tools/testing/selftests/authority/establishment_test.c
+ create mode 100644 tools/testing/selftests/authority/handle_test.c
+ create mode 100644 tools/testing/selftests/authority/idmapped_test.c
+ create mode 100644 tools/testing/selftests/authority/qualification_test.c
+
+diff --git a/tools/testing/selftests/authority/authority_test.c b/tools/testing/selftests/authority/authority_test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..2320ec07cc759cf00130d14302e13b27ab19037e
+--- /dev/null
++++ b/tools/testing/selftests/authority/authority_test.c
+@@ -0,0 +1,549 @@
++// SPDX-License-Identifier: GPL-2.0
++#define _GNU_SOURCE
++#include <errno.h>
++#include <fcntl.h>
++#ifndef F_LINUX_SPECIFIC_BASE
++#define F_LINUX_SPECIFIC_BASE 1024
++#endif
++#define _ASM_GENERIC_FCNTL_H
++#include <linux/fcntl.h>
++#include <linux/prctl.h>
++#include <limits.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/prctl.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <sys/wait.h>
++#include <unistd.h>
++
++#include "../kselftest.h"
++
++#define CASE_SKIP 77
++#define FILE_CONTENT "authority-selftest-data"
++
++struct fixture {
++	char path[PATH_MAX];
++	int dirfd;
++	int oldfd;
++	int newfd;
++};
++
++struct scope_request {
++	int fd;
++	unsigned int right;
++};
++
++static char self_exe[PATH_MAX];
++
++typedef int (*case_fn)(const struct fixture *fixture);
++
++static int add_scope(int fd, unsigned int right)
++{
++	if (prctl(PR_CAPAUTH, PR_CAPAUTH_ADD_FS_SCOPE,
++		  (unsigned long)fd, right, 0) == 0)
++		return 0;
++	if (errno == EPERM || errno == EACCES)
++		return CASE_SKIP;
++	return -1;
++}
++
++static int enter_domain(unsigned char handled,
++			const struct scope_request *scopes, size_t nr_scopes)
++{
++	union {
++		uint64_t alignment;
++		unsigned char data[sizeof(struct pr_capauth_confine) + 1];
++	} request_storage = {};
++	struct pr_capauth_confine *request = (void *)request_storage.data;
++	size_t i;
++
++	for (i = 0; i < nr_scopes; i++) {
++		int error = add_scope(scopes[i].fd, scopes[i].right);
++
++		if (error)
++			return error;
++	}
++	request->size = sizeof(request_storage.data);
++	request->version = PR_CAPAUTH_CONFINE_VERSION_1;
++	request->handled[0] = handled;
++	if (prctl(PR_CAPAUTH, PR_CAPAUTH_CONFINE,
++		  (unsigned long)request, 0, 0) == 0)
++		return 0;
++	return -1;
++}
++
++static int skip_unless_root(void)
++{
++	return geteuid() == 0 ? 0 : CASE_SKIP;
++}
++
++static int drop_to_unprivileged(void)
++{
++	if (setgid(65534) || setuid(65534))
++		return CASE_SKIP;
++	return 0;
++}
++
++static int expect_errno(int result, int expected)
++{
++	return result == -1 && errno == expected ? 0 : -1;
++}
++
++static int case_unhandled_write(const struct fixture *fixture)
++{
++	int fd;
++
++	if (skip_unless_root())
++		return CASE_SKIP;
++	if (enter_domain(1U << PR_CAPAUTH_FS_READ_FILE, NULL, 0))
++		return 1;
++	fd = openat(fixture->dirfd, "file", O_WRONLY);
++	if (fd < 0)
++		return 1;
++	close(fd);
++	return 0;
++}
++
++static int case_handled_read_ceiling(const struct fixture *fixture)
++{
++	int fd;
++
++	if (skip_unless_root())
++		return CASE_SKIP;
++	if (enter_domain(1U << PR_CAPAUTH_FS_READ_FILE, NULL, 0))
++		return 1;
++	fd = openat(fixture->dirfd, "file", O_RDONLY);
++	if (expect_errno(fd, EACCES)) {
++		if (fd >= 0)
++			close(fd);
++		return 1;
++	}
++	return 0;
++}
++
++static int case_scoped_read_grant(const struct fixture *fixture)
++{
++	const struct scope_request scopes[] = {
++		{ fixture->dirfd, PR_CAPAUTH_FS_READ_FILE },
++	};
++	char buffer[sizeof(FILE_CONTENT)];
++	int error, fd;
++
++	error = enter_domain(1U << PR_CAPAUTH_FS_READ_FILE, scopes,
++			     ARRAY_SIZE(scopes));
++	if (error)
++		return error == CASE_SKIP ? CASE_SKIP : 1;
++	if (drop_to_unprivileged())
++		return CASE_SKIP;
++	fd = openat(fixture->dirfd, "file", O_RDONLY);
++	if (fd < 0)
++		return 1;
++	error = read(fd, buffer, sizeof(FILE_CONTENT) - 1) ==
++			sizeof(FILE_CONTENT) - 1 &&
++			!memcmp(buffer, FILE_CONTENT, sizeof(FILE_CONTENT) - 1) ? 0 : 1;
++	close(fd);
++	return error;
++}
++
++static int case_create_does_not_mint_write(const struct fixture *fixture)
++{
++	const struct scope_request scopes[] = {
++		{ fixture->dirfd, PR_CAPAUTH_FS_CREATE_FILE },
++	};
++	int fd, error;
++	struct stat st;
++
++	error = enter_domain((1U << PR_CAPAUTH_FS_CREATE_FILE) |
++			     (1U << PR_CAPAUTH_FS_WRITE_FILE), scopes,
++			     ARRAY_SIZE(scopes));
++	if (error)
++		return error == CASE_SKIP ? CASE_SKIP : 1;
++	if (drop_to_unprivileged())
++		return CASE_SKIP;
++	fd = openat(fixture->dirfd, "new", O_CREAT | O_EXCL | O_WRONLY, 0600);
++	if (expect_errno(fd, EACCES)) {
++		if (fd >= 0)
++			close(fd);
++		return 1;
++	}
++	return fstatat(fixture->dirfd, "new", &st, AT_SYMLINK_NOFOLLOW) == -1 &&
++		errno == ENOENT ? 0 : 1;
++}
++
++static int case_create_and_write_scopes(const struct fixture *fixture)
++{
++	const struct scope_request scopes[] = {
++		{ fixture->dirfd, PR_CAPAUTH_FS_CREATE_FILE },
++		{ fixture->dirfd, PR_CAPAUTH_FS_WRITE_FILE },
++	};
++	int error, fd;
++
++	error = enter_domain((1U << PR_CAPAUTH_FS_CREATE_FILE) |
++			     (1U << PR_CAPAUTH_FS_WRITE_FILE), scopes,
++			     ARRAY_SIZE(scopes));
++	if (error)
++		return error == CASE_SKIP ? CASE_SKIP : 1;
++	if (drop_to_unprivileged())
++		return CASE_SKIP;
++	fd = openat(fixture->dirfd, "new", O_CREAT | O_EXCL | O_WRONLY, 0600);
++	if (fd < 0)
++		return 1;
++	error = write(fd, FILE_CONTENT, sizeof(FILE_CONTENT) - 1) ==
++			sizeof(FILE_CONTENT) - 1 ? 0 : 1;
++	close(fd);
++	return error;
++}
++
++static int case_path_truncate_write_ceiling(const struct fixture *fixture)
++{
++	char path[PATH_MAX];
++
++	if (skip_unless_root())
++		return CASE_SKIP;
++	if (enter_domain(1U << PR_CAPAUTH_FS_WRITE_FILE, NULL, 0))
++		return 1;
++	if (snprintf(path, sizeof(path), "%s/file", fixture->path) >=
++	    sizeof(path))
++		return 1;
++	return expect_errno(truncate(path, 0), EACCES) ? 1 : 0;
++}
++
++static int case_fd_survives_scope_drop(const struct fixture *fixture)
++{
++	const struct scope_request scopes[] = {
++		{ fixture->dirfd, PR_CAPAUTH_FS_WRITE_FILE },
++	};
++	int error, fd;
++
++	error = enter_domain(1U << PR_CAPAUTH_FS_WRITE_FILE, scopes,
++			     ARRAY_SIZE(scopes));
++	if (error)
++		return error == CASE_SKIP ? CASE_SKIP : 1;
++	fd = openat(fixture->dirfd, "file", O_WRONLY);
++	if (fd < 0)
++		return 1;
++	if (prctl(PR_CAPAUTH, PR_CAPAUTH_DROP_FS_SCOPE_RIGHT,
++		  (unsigned long)fixture->dirfd, PR_CAPAUTH_FS_WRITE_FILE, 0)) {
++		close(fd);
++		return 1;
++	}
++	if (write(fd, "x", 1) != 1) {
++		close(fd);
++		return 1;
++	}
++	close(fd);
++	return 0;
++}
++
++static int unlink_cap(int dirfd, const char *name)
++{
++	return prctl(PR_CAPAUTH, PR_CAPAUTH_UNLINKAT, (unsigned long)dirfd,
++		     (unsigned long)name, 0);
++}
++
++static int case_delete_missing_scope(const struct fixture *fixture)
++{
++	if (skip_unless_root())
++		return CASE_SKIP;
++	if (enter_domain(1U << PR_CAPAUTH_FS_DELETE_FILE, NULL, 0))
++		return 1;
++	return expect_errno(unlink_cap(fixture->dirfd, "victim"), EACCES) ?
++		1 : 0;
++}
++
++static int case_delete_exact_scope(const struct fixture *fixture)
++{
++	const struct scope_request scopes[] = {
++		{ fixture->dirfd, PR_CAPAUTH_FS_DELETE_FILE },
++	};
++	int error;
++
++	error = enter_domain(1U << PR_CAPAUTH_FS_DELETE_FILE, scopes,
++			     ARRAY_SIZE(scopes));
++	if (error)
++		return error == CASE_SKIP ? CASE_SKIP : 1;
++	if (drop_to_unprivileged())
++		return CASE_SKIP;
++	return unlink_cap(fixture->dirfd, "victim") == 0 ? 0 : 1;
++}
++
++static int rename_cap(int oldfd, int newfd, const char *oldname,
++		      const char *newname)
++{
++	struct pr_capauth_renameat2 request = {
++		.olddirfd = oldfd,
++		.newdirfd = newfd,
++		.oldname = (uintptr_t)oldname,
++		.newname = (uintptr_t)newname,
++	};
++
++	return prctl(PR_CAPAUTH, PR_CAPAUTH_RENAMEAT2,
++		     (unsigned long)&request, 0, 0);
++}
++
++static int case_rename_requires_both_parents(const struct fixture *fixture)
++{
++	const struct scope_request scopes[] = {
++		{ fixture->oldfd, PR_CAPAUTH_FS_RENAME },
++	};
++	int error;
++
++	if (fixture->oldfd < 0 || fixture->newfd < 0)
++		return 1;
++	if (skip_unless_root())
++		return CASE_SKIP;
++	error = enter_domain(1U << PR_CAPAUTH_FS_RENAME, scopes,
++			     ARRAY_SIZE(scopes));
++	if (error)
++		return error == CASE_SKIP ? CASE_SKIP : 1;
++	return expect_errno(rename_cap(fixture->oldfd, fixture->newfd,
++				       "source", "target"), EACCES) ? 1 : 0;
++}
++
++static int case_rename_scoped_both_parents(const struct fixture *fixture)
++{
++	const struct scope_request scopes[] = {
++		{ fixture->oldfd, PR_CAPAUTH_FS_RENAME },
++		{ fixture->newfd, PR_CAPAUTH_FS_RENAME },
++	};
++	int error;
++
++	if (fixture->oldfd < 0 || fixture->newfd < 0)
++		return 1;
++	error = enter_domain(1U << PR_CAPAUTH_FS_RENAME, scopes,
++			     ARRAY_SIZE(scopes));
++	if (error)
++		return error == CASE_SKIP ? CASE_SKIP : 1;
++	if (drop_to_unprivileged())
++		return CASE_SKIP;
++	return rename_cap(fixture->oldfd, fixture->newfd,
++			  "source", "target") == 0 ? 0 : 1;
++}
++
++static int case_fd_attenuation(const struct fixture *fixture)
++{
++	const struct scope_request scopes[] = {
++		{ fixture->dirfd, PR_CAPAUTH_FS_READ_FILE },
++		{ fixture->dirfd, PR_CAPAUTH_FS_WRITE_FILE },
++	};
++	union {
++		uint64_t alignment;
++		unsigned char data[sizeof(struct fd_cap_request) + 1];
++	} request_storage = {};
++	struct fd_cap_request *request = (void *)request_storage.data;
++	char buffer[sizeof(FILE_CONTENT)];
++	int error, fd;
++
++	error = enter_domain((1U << PR_CAPAUTH_FS_READ_FILE) |
++			     (1U << PR_CAPAUTH_FS_WRITE_FILE), scopes,
++			     ARRAY_SIZE(scopes));
++	if (error)
++		return error == CASE_SKIP ? CASE_SKIP : 1;
++	fd = openat(fixture->dirfd, "file", O_RDWR);
++	if (fd < 0)
++		return 1;
++	request->size = sizeof(request_storage.data);
++	request->version = FD_CAP_VERSION_1;
++	request->rights[0] = 1U << FD_CAP_READ;
++	if (fcntl(fd, F_RESTRICTFD_CAP, request)) {
++		close(fd);
++		return 1;
++	}
++	request->rights[0] = 0;
++	if (fcntl(fd, F_GETFD_CAP, request) ||
++	    request->rights[0] != (1U << FD_CAP_READ)) {
++		close(fd);
++		return 1;
++	}
++	if (expect_errno(write(fd, "x", 1), EBADF)) {
++		close(fd);
++		return 1;
++	}
++	if (lseek(fd, 0, SEEK_SET) < 0 ||
++	    read(fd, buffer, sizeof(FILE_CONTENT) - 1) !=
++			sizeof(FILE_CONTENT) - 1) {
++		close(fd);
++		return 1;
++	}
++	close(fd);
++	return 0;
++}
++
++static int exec_probe_read(int dirfd)
++{
++	int fd = openat(dirfd, "file", O_RDONLY);
++
++	if (fd >= 0) {
++		close(fd);
++		return 1;
++	}
++	return errno == EACCES ? 0 : 1;
++}
++
++static int case_fork_exec_inheritance(const struct fixture *fixture)
++{
++	pid_t child;
++	int status;
++	char fd_string[32];
++
++	if (skip_unless_root())
++		return CASE_SKIP;
++	if (enter_domain(1U << PR_CAPAUTH_FS_READ_FILE, NULL, 0))
++		return 1;
++	child = fork();
++	if (child < 0)
++		return 1;
++	if (!child) {
++		int length = snprintf(fd_string, sizeof(fd_string), "%d",
++				      fixture->dirfd);
++
++		if (length < 0 || (size_t)length >= sizeof(fd_string))
++			_exit(127);
++		execl(self_exe, self_exe, "--probe-read", fd_string,
++		      (char *)NULL);
++		_exit(127);
++	}
++	if (waitpid(child, &status, 0) != child || !WIFEXITED(status))
++		return 1;
++	return WEXITSTATUS(status) == 0 ? 0 : 1;
++}
++
++static int fixture_create(struct fixture *fixture, unsigned int index)
++{
++	char template[PATH_MAX];
++	int fd;
++
++	memset(fixture, 0, sizeof(*fixture));
++	fixture->dirfd = fixture->oldfd = fixture->newfd = -1;
++	if (snprintf(template, sizeof(template), "/tmp/capauth-%ld-%u-XXXXXX",
++		     (long)getpid(), index) >= sizeof(template))
++		return -1;
++	if (!mkdtemp(template))
++		return -1;
++	strcpy(fixture->path, template);
++	if (chmod(fixture->path, 0711))
++		return -1;
++	fixture->dirfd = open(fixture->path, O_PATH | O_DIRECTORY);
++	if (fixture->dirfd < 0)
++		return -1;
++	fd = openat(fixture->dirfd, "file", O_CREAT | O_EXCL | O_RDWR, 0600);
++	if (fd < 0)
++		return -1;
++	if (write(fd, FILE_CONTENT, sizeof(FILE_CONTENT) - 1) !=
++	    sizeof(FILE_CONTENT) - 1 || fchmod(fd, 0000)) {
++		close(fd);
++		return -1;
++	}
++	close(fd);
++	fd = openat(fixture->dirfd, "victim", O_CREAT | O_EXCL | O_RDWR, 0600);
++	if (fd < 0)
++		return -1;
++	close(fd);
++	if (mkdirat(fixture->dirfd, "old", 0711) ||
++	    mkdirat(fixture->dirfd, "newdir", 0711))
++		return -1;
++	fixture->oldfd = openat(fixture->dirfd, "old", O_PATH | O_DIRECTORY);
++	fixture->newfd = openat(fixture->dirfd, "newdir", O_PATH | O_DIRECTORY);
++	if (fixture->oldfd < 0 || fixture->newfd < 0)
++		return -1;
++	fd = openat(fixture->oldfd, "source", O_CREAT | O_EXCL | O_RDWR, 0600);
++	if (fd < 0)
++		return -1;
++	close(fd);
++	return 0;
++}
++
++static void fixture_destroy(struct fixture *fixture)
++{
++	if (fixture->oldfd >= 0)
++		close(fixture->oldfd);
++	if (fixture->newfd >= 0)
++		close(fixture->newfd);
++	if (fixture->dirfd >= 0) {
++		unlinkat(fixture->dirfd, "file", 0);
++		unlinkat(fixture->dirfd, "new", 0);
++		unlinkat(fixture->dirfd, "victim", 0);
++		unlinkat(fixture->dirfd, "old/source", 0);
++		unlinkat(fixture->dirfd, "newdir/target", 0);
++		unlinkat(fixture->dirfd, "old", AT_REMOVEDIR);
++		unlinkat(fixture->dirfd, "newdir", AT_REMOVEDIR);
++		close(fixture->dirfd);
++	}
++	if (fixture->path[0])
++		rmdir(fixture->path);
++}
++
++static void run_case(unsigned int index, const char *name, case_fn function)
++{
++	struct fixture fixture;
++	pid_t child;
++	int status, result;
++
++	if (fixture_create(&fixture, index)) {
++		fixture_destroy(&fixture);
++		ksft_test_result_fail("%s (fixture setup)\n", name);
++		return;
++	}
++	child = fork();
++	if (child == 0)
++		_exit(function(&fixture));
++	if (child < 0 || waitpid(child, &status, 0) != child) {
++		fixture_destroy(&fixture);
++		ksft_test_result_fail("%s (fork/wait)\n", name);
++		return;
++	}
++	result = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
++	fixture_destroy(&fixture);
++	if (result == CASE_SKIP)
++		ksft_test_result_skip("%s (requires CAP_SYS_ADMIN or setuid)\n",
++				      name);
++	else if (result)
++		ksft_test_result_fail("%s\n", name);
++	else
++		ksft_test_result_pass("%s\n", name);
++}
++
++int main(int argc, char **argv)
++{
++	if (argc == 3 && !strcmp(argv[1], "--probe-read"))
++		return exec_probe_read(atoi(argv[2]));
++	if (argc > 1)
++		return 2;
++	if (!realpath(argv[0], self_exe))
++		return 2;
++	if (prctl(PR_CAPAUTH, PR_CAPAUTH_GET_CONFINED, 0, 0, 0) < 0)
++		ksft_exit_skip("kernel lacks PR_CAPAUTH support\n");
++
++	ksft_print_header();
++	ksft_set_plan(13);
++	run_case(1, "unhandled WRITE retains legacy DAC behavior",
++		 case_unhandled_write);
++	run_case(2, "handled READ ceiling denies without scope despite root DAC",
++		 case_handled_read_ceiling);
++	run_case(3, "scoped READ grants mode-000 file after dropping DAC privilege",
++		 case_scoped_read_grant);
++	run_case(4, "CREATE alone does not mint initial WRITE authority",
++		 case_create_does_not_mint_write);
++	run_case(5, "separate CREATE and WRITE scopes permit initial writable FD",
++		 case_create_and_write_scopes);
++	run_case(6, "path truncate is a fresh handled WRITE request",
++		 case_path_truncate_write_ceiling);
++	run_case(7, "established writable FD survives scope-right drop",
++		 case_fd_survives_scope_drop);
++	run_case(8, "DELETE without exact-parent scope is denied",
++		 case_delete_missing_scope);
++	run_case(9, "exact-parent DELETE scope permits unlink",
++		 case_delete_exact_scope);
++	run_case(10, "RENAME requires both exact parent scopes",
++		 case_rename_requires_both_parents);
++	run_case(11, "two exact-parent RENAME scopes permit regular-file rename",
++		 case_rename_scoped_both_parents);
++	run_case(12, "FD restriction removes WRITE without removing READ",
++		 case_fd_attenuation);
++	run_case(13, "fork and exec preserve handled confinement",
++		 case_fork_exec_inheritance);
++	ksft_finished();
++}
+diff --git a/tools/testing/selftests/authority/callback_test.c b/tools/testing/selftests/authority/callback_test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..4bdb1c5daed2df576e9f189eb4622346f458ff0b
+--- /dev/null
++++ b/tools/testing/selftests/authority/callback_test.c
+@@ -0,0 +1,125 @@
++// SPDX-License-Identifier: GPL-2.0
++#define _GNU_SOURCE
++#include <errno.h>
++#include <fcntl.h>
++#define _ASM_GENERIC_FCNTL_H
++#define F_LINUX_SPECIFIC_BASE 1024
++#include <linux/fcntl.h>
++#include <linux/mount.h>
++#include <linux/prctl.h>
++#include <linux/posix_acl_xattr.h>
++#include <sched.h>
++#include <signal.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mount.h>
++#include <sys/prctl.h>
++#include <sys/stat.h>
++#include <sys/syscall.h>
++#include <sys/wait.h>
++#include <sys/xattr.h>
++#include <unistd.h>
++#include "../kselftest.h"
++#define CHECK(c) do { if (!(c)) { dprintf(2,"# %s:%d %s errno=%d\n",__func__,__LINE__,#c,errno); return 1; } } while (0)
++static int api, managed, plain, mapped, dfd, ofd;
++static char base[128], mpath[160];
++static int capop(int fd,int op,unsigned char bits)
++{
++ union {uint64_t align;unsigned char bytes[sizeof(struct fd_cap_request)+1];} s={};
++ struct fd_cap_request *r=(void *)s.bytes;
++ r->size=sizeof(s.bytes);r->version=FD_CAP_VERSION_1;r->rights[0]=bits;
++ int rc=fcntl(fd,op,r);
++ return !rc&&op==F_GETFD_CAP?r->rights[0]:rc;
++}
++static int confine(unsigned char mask)
++{
++ if(!managed)return 0;
++ union {uint64_t align;unsigned char bytes[sizeof(struct pr_capauth_confine)+1];} s={};
++ struct pr_capauth_confine *r=(void *)s.bytes;
++ r->size=sizeof(s.bytes);r->version=PR_CAPAUTH_CONFINE_VERSION_1;r->handled[0]=mask;
++ return prctl(PR_CAPAUTH,PR_CAPAUTH_CONFINE,(unsigned long)r,0UL,0UL);
++}
++static int scope(int fd,int right)
++{
++ return managed?prctl(PR_CAPAUTH,PR_CAPAUTH_ADD_FS_SCOPE,(unsigned long)fd,(unsigned long)right,0UL):0;
++}
++static int setup(void)
++{
++ char lower[180],upper[180],work[180],opts[700];int fd;
++ CHECK(!unshare(CLONE_NEWNS)&&!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
++ strcpy(base,"/tmp/authority-ovl.XXXXXX");CHECK(mkdtemp(base)&&!chmod(base,0755));
++ snprintf(lower,sizeof(lower),"%s/lower",base);snprintf(upper,sizeof(upper),"%s/upper",base);
++ snprintf(work,sizeof(work),"%s/work",base);snprintf(mpath,sizeof(mpath),"%s/merged",base);
++ CHECK(!mkdir(lower,0755)&&!mkdir(upper,0755)&&!mkdir(work,0755)&&!mkdir(mpath,0755));
++ plain=open(lower,O_PATH|O_DIRECTORY);CHECK(plain>=0);
++ fd=openat(plain,"denied",O_CREAT|O_RDWR,0000);CHECK(fd>=0&&write(fd,"data",4)==4);close(fd);
++ fd=openat(plain,"allowed",O_CREAT|O_RDWR,0444);CHECK(fd>=0&&write(fd,"data",4)==4);close(fd);
++ CHECK(!mkdirat(plain,"deny-dir",0555)&&!mkdirat(plain,"allow-dir",0777));
++ CHECK(!fchmodat(plain,"allow-dir",0777,0));
++ snprintf(opts,sizeof(opts),"lowerdir=%s,upperdir=%s,workdir=%s",lower,upper,work);
++ CHECK(!mount("overlay",mpath,"overlay",0,opts));
++ mapped=open(mpath,O_PATH|O_DIRECTORY);CHECK(mapped>=0);
++ dfd=openat(mapped,"deny-dir",O_PATH|O_DIRECTORY);ofd=openat(mapped,"allow-dir",O_PATH|O_DIRECTORY);CHECK(dfd>=0&&ofd>=0);
++ return 0;
++}
++static int drop(void){return setgid(1000)||setuid(1000);}
++static int data(void)
++{
++ int fd,source;char c;
++ CHECK(!setup());source=openat(mapped,"denied",O_RDWR);CHECK(source>=0);
++ CHECK(!scope(mapped,PR_CAPAUTH_FS_READ_FILE)&&!scope(mapped,PR_CAPAUTH_FS_WRITE_FILE));
++ CHECK(!confine(0x18)&&!drop());
++ errno=0;CHECK(openat(mapped,"denied",O_RDONLY)==-1&&errno==EACCES);
++ fd=openat(mapped,"allowed",O_RDONLY);CHECK(fd>=0&&read(fd,&c,1)==1&&c=='d');
++ CHECK(pread(source,&c,1,0)==1&&c=='d');
++ if(managed){
++  errno=0;CHECK(capop(source,F_GETFD_CAP,0)==-1&&errno==EOPNOTSUPP);
++  errno=0;CHECK(capop(source,F_CLONEFD_CAP,1)==-1&&errno==EOPNOTSUPP);
++  errno=0;CHECK(capop(source,F_RESTRICTFD_CAP,1)==-1&&errno==EOPNOTSUPP);
++ }
++ return 0;
++}
++static int namespace_ops(void)
++{
++ int fd;struct stat st;
++ CHECK(!setup());
++ for(int r=1;r<=7;r++){
++  if(r==2)continue;
++  CHECK(!scope(ofd,r));
++  if(r==1||r==3||r==4)CHECK(!scope(mapped,r));
++ }
++ CHECK(!confine(0xfa)&&!drop());
++ errno=0;CHECK(openat(dfd,"new",O_CREAT|O_RDWR,0600)==-1&&errno==EACCES);
++ CHECK(fstatat(dfd,"new",&st,0)==-1&&errno==ENOENT);
++ fd=openat(ofd,"new",O_CREAT|O_RDWR,0600);CHECK(fd>=0&&write(fd,"data",4)==4);
++ CHECK(!linkat(ofd,"new",ofd,"alias",0));
++ CHECK(!syscall(SYS_renameat2,ofd,"new",ofd,"renamed",RENAME_NOREPLACE));
++ CHECK(!unlinkat(ofd,"alias",0)&&!unlinkat(ofd,"renamed",0));
++ CHECK(!ftruncate(fd,1));return 0;
++}
++int main(void)
++{
++ const struct {const char *name;int (*run)(void);int mode;} cases[]={
++ {"native overlay callback DAC and established FD",data,0},
++ {"handled grants cannot override callback; FD cap API unsupported",data,1},
++ {"native overlay namespace permission and lifetime",namespace_ops,0},
++ {"handled overlay namespace grants retain callback denial",namespace_ops,1}};
++ int rc,status;pid_t pid;
++ setvbuf(stdout,NULL,_IONBF,0);ksft_print_header();if(geteuid())ksft_exit_skip("requires isolated root guest\n");
++ errno=0;rc=prctl(PR_CAPAUTH,PR_CAPAUTH_GET_CONFINED,0UL,0UL,0UL);
++ if(rc==-1&&errno!=EINVAL)ksft_exit_fail_msg("Authority query error %d\n",errno);
++ if(rc>0)ksft_exit_fail_msg("requires initially unconfined process\n");
++ api=rc==0;
++ pid=fork();CHECK(pid>=0);if(!pid)_exit(unshare(CLONE_NEWNS)?4:0);
++ CHECK(waitpid(pid,&status,0)==pid);
++ if(!WIFEXITED(status)||WEXITSTATUS(status))ksft_exit_skip("privileged mount namespace setup unavailable\n");
++ ksft_set_plan(ARRAY_SIZE(cases));
++ for(unsigned i=0;i<ARRAY_SIZE(cases);i++){
++  if(cases[i].mode&&!api){ksft_test_result_skip("%s (custom API unavailable)\n",cases[i].name);continue;}
++  managed=cases[i].mode;pid=fork();CHECK(pid>=0);if(!pid)_exit(cases[i].run());
++  CHECK(waitpid(pid,&status,0)==pid);ksft_test_result(WIFEXITED(status)&&!WEXITSTATUS(status),"%s\n",cases[i].name);
++ }
++ ksft_finished();
++}
+diff --git a/tools/testing/selftests/authority/dac_fd_test.c b/tools/testing/selftests/authority/dac_fd_test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..0eb5f8c82ff375a759d83a188c0e1d733933ef6b
+--- /dev/null
++++ b/tools/testing/selftests/authority/dac_fd_test.c
+@@ -0,0 +1,126 @@
++// SPDX-License-Identifier: GPL-2.0
++#define _GNU_SOURCE
++#include <errno.h>
++#include <fcntl.h>
++#define _ASM_GENERIC_FCNTL_H
++#define F_LINUX_SPECIFIC_BASE 1024
++#include <linux/fcntl.h>
++#include <linux/prctl.h>
++#include <linux/io_uring.h>
++#include <linux/fanotify.h>
++#include <sys/fanotify.h>
++#include <sys/mman.h>
++#include <sys/prctl.h>
++#include <sys/stat.h>
++#include <sys/syscall.h>
++#include <sys/wait.h>
++#include <poll.h>
++#include <signal.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <grp.h>
++#include <sys/fsuid.h>
++#include <sys/sendfile.h>
++#include "../kselftest.h"
++#define CHECK(c) do {if(!(c)){dprintf(2,"# %s:%d %s errno=%d\n",__func__,__LINE__,#c,errno);return 1;}} while(0)
++static int api,variant;static char dir[100],path[150];static int rootfd;
++static int capop(int fd,int op,int bits)
++{
++ union{uint64_t align;unsigned char b[sizeof(struct fd_cap_request)+1];}s={};
++ struct fd_cap_request*r=(void*)s.b;r->size=sizeof(s.b);r->version=FD_CAP_VERSION_1;r->rights[0]=bits;
++ int rc=fcntl(fd,op,r);return !rc&&op==F_GETFD_CAP?r->rights[0]:rc;
++}
++static int setup(void)
++{
++ int fd;strcpy(dir,"/tmp/authority-est.XXXXXX");CHECK(mkdtemp(dir));rootfd=open(dir,O_PATH|O_DIRECTORY);CHECK(rootfd>=0);
++ snprintf(path,sizeof(path),"%s/file",dir);fd=open(path,O_CREAT|O_RDWR,0600);CHECK(fd>=0&&write(fd,"data",4)==4);close(fd);return 0;
++}
++static int enter(unsigned char mask)
++{
++ union{uint64_t a;unsigned char b[sizeof(struct pr_capauth_confine)+1];}s={};
++ struct pr_capauth_confine*r=(void*)s.b;r->size=sizeof(s.b);r->version=PR_CAPAUTH_CONFINE_VERSION_1;r->handled[0]=mask;
++ return prctl(PR_CAPAUTH,PR_CAPAUTH_CONFINE,(unsigned long)r,0UL,0UL);
++}
++static int groups(void)
++{
++ int fd;gid_t group=1001;CHECK(!setup()&&!chmod(dir,0755));CHECK(!chown(path,0,1001)&&!chmod(path,0040));
++ if(variant)CHECK(!enter(0));
++ CHECK(!setgroups(1,&group)&&!setgid(1002)&&!setuid(1002));
++ fd=open(path,O_RDONLY);CHECK(fd>=0);errno=0;CHECK(open(path,O_WRONLY)==-1&&errno==EACCES);return 0;
++}
++static int fsidentity(void)
++{
++ int fd;CHECK(!setup()&&!chmod(dir,0755));CHECK(!chmod(path,0000));
++ if(variant)CHECK(!prctl(PR_CAPAUTH,PR_CAPAUTH_ADD_FS_SCOPE,(unsigned long)rootfd,(unsigned long)PR_CAPAUTH_FS_READ_FILE,0UL));
++ if(variant==2)CHECK(!enter(0x18));else if(variant==1)CHECK(!enter(0));
++ setfsgid(1002);setfsuid(1002);CHECK(setfsuid((uid_t)-1)==1002);
++ errno=0;fd=open(path,O_RDONLY);
++ if(variant)CHECK(fd>=0);else CHECK(fd==-1&&errno==EACCES);
++ errno=0;CHECK(open(path,O_WRONLY)==-1&&errno==EACCES);return 0;
++}
++static int owner_ceiling(void)
++{
++ CHECK(!setup()&&!chmod(path,0666)&&!enter(0x18));
++ errno=0;CHECK(open(path,O_RDWR)==-1&&errno==EACCES);return 0;
++}
++static int transfer(void)
++{
++ int src,dst,pipefd[2];char target[150],c;
++ CHECK(!setup());src=open(path,O_RDWR);CHECK(src>=0);
++ snprintf(target,sizeof(target),"%s/destination",dir);dst=open(target,O_CREAT|O_RDWR,0600);CHECK(dst>=0);
++ CHECK(write(dst,"data",4)==4&&!pipe(pipefd));
++ if(variant==0)CHECK(!capop(src,F_RESTRICTFD_CAP,1));
++ if(variant==1)CHECK(!capop(src,F_RESTRICTFD_CAP,0));
++ if(variant==2)CHECK(!capop(dst,F_RESTRICTFD_CAP,1));
++ off_t a=0,b=0;ssize_t n;
++ errno=0;n=sendfile(dst,src,&a,1);
++ if(!variant)CHECK(n==1);else CHECK(n==-1&&(errno==EBADF||errno==EACCES));
++ a=b=0;errno=0;n=copy_file_range(src,&a,dst,&b,1,0);
++ if(!variant)CHECK(n==1);else CHECK(n==-1&&(errno==EBADF||errno==EACCES));
++ a=0;errno=0;n=splice(src,&a,pipefd[1],NULL,1,0);
++ if(variant==1)CHECK(n==-1&&(errno==EBADF||errno==EACCES));
++ else {
++  CHECK(n==1);b=0;errno=0;n=splice(pipefd[0],NULL,dst,&b,1,0);
++  if(variant==2)CHECK(n==-1&&(errno==EBADF||errno==EACCES));else CHECK(n==1);
++ }
++ CHECK(pread(dst,&c,1,0)==1&&c=='d');return 0;
++}
++static int mappings(void)
++{
++ int fd;void*p,*cow;CHECK(!setup());fd=open(path,O_RDWR);CHECK(fd>=0&&!ftruncate(fd,4096));
++ CHECK(!capop(fd,F_RESTRICTFD_CAP,1));
++ errno=0;CHECK(mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0)==MAP_FAILED&&errno==EACCES);
++ p=mmap(NULL,4096,PROT_READ,MAP_SHARED,fd,0);CHECK(p!=MAP_FAILED);
++ errno=0;CHECK(mprotect(p,4096,PROT_READ|PROT_WRITE)==-1&&errno==EACCES);
++ cow=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE,fd,0);CHECK(cow!=MAP_FAILED);memcpy(cow,"cow!",4);
++ errno=0;CHECK(fallocate(fd,0,0,8192)==-1&&(errno==EBADF||errno==EACCES));
++ return 0;
++}
++static int metadata(void)
++{
++ int fd;char c;CHECK(!setup());fd=open(path,O_RDWR);CHECK(fd>=0&&!capop(fd,F_RESTRICTFD_CAP,0));
++ CHECK(!fchmod(fd,0644));CHECK(!fcntl(fd,F_SETFL,O_APPEND));
++ errno=0;CHECK(read(fd,&c,1)==-1&&errno==EBADF);
++ errno=0;CHECK(write(fd,"x",1)==-1&&errno==EBADF);return 0;
++}
++int main(void)
++{
++ const struct{const char*name;int(*run)(void);int v,need;}cases[]={
++ {"native supplementary-group DAC",groups,0,0},{"UNHANDLED supplementary-group DAC",groups,1,1},
++ {"native non-owner FSUID DAC denial",fsidentity,0,0},
++ {"UNHANDLED additive READ grant with non-owner FSUID",fsidentity,1,1},
++ {"handled READ grant with non-owner FSUID",fsidentity,2,1},{"root DAC cannot exceed handled ceiling",owner_ceiling,0,1},
++ {"READ-only source permits sendfile copy_file_range splice",transfer,0,1},
++ {"zero-read source denies all transfer APIs",transfer,1,1},{"WRITE-less destination denies all transfer APIs",transfer,2,1},
++ {"shared mmap mprotect fallocate attenuation; private COW",mappings,0,1},{"metadata and F_SETFL do not restore data authority",metadata,0,1}};
++ int rc,status;pid_t pid;setvbuf(stdout,NULL,_IONBF,0);ksft_print_header();if(geteuid())ksft_exit_skip("requires root disposable guest\n");
++ errno=0;rc=prctl(PR_CAPAUTH,PR_CAPAUTH_GET_CONFINED,0UL,0UL,0UL);if(rc==-1&&errno!=EINVAL)ksft_exit_fail_msg("query error\n");if(rc>0)ksft_exit_fail_msg("already confined\n");api=rc==0;
++ ksft_set_plan(ARRAY_SIZE(cases));for(unsigned i=0;i<ARRAY_SIZE(cases);i++){
++  if(cases[i].need&&!api){ksft_test_result_skip("%s (API unavailable)\n",cases[i].name);continue;}
++  variant=cases[i].v;pid=fork();CHECK(pid>=0);if(!pid)_exit(cases[i].run());CHECK(waitpid(pid,&status,0)==pid);
++  ksft_test_result(WIFEXITED(status)&&!WEXITSTATUS(status),"%s\n",cases[i].name);
++ }ksft_finished();
++}
+diff --git a/tools/testing/selftests/authority/establishment_test.c b/tools/testing/selftests/authority/establishment_test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..66d880d07ae59aac23ea71afdd9cdb9f176e4abd
+--- /dev/null
++++ b/tools/testing/selftests/authority/establishment_test.c
+@@ -0,0 +1,148 @@
++// SPDX-License-Identifier: GPL-2.0
++#define _GNU_SOURCE
++#include <errno.h>
++#include <fcntl.h>
++#define _ASM_GENERIC_FCNTL_H
++#define F_LINUX_SPECIFIC_BASE 1024
++#include <linux/fcntl.h>
++#include <linux/prctl.h>
++#include <linux/io_uring.h>
++#include <linux/fanotify.h>
++#include <sys/fanotify.h>
++#include <sys/mman.h>
++#include <sys/prctl.h>
++#include <sys/stat.h>
++#include <sys/syscall.h>
++#include <sys/wait.h>
++#include <sys/shm.h>
++#include <poll.h>
++#include <signal.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include "../kselftest.h"
++#define CHECK(c) do {if(!(c)){dprintf(2,"# %s:%d %s errno=%d\n",__func__,__LINE__,#c,errno);return 1;}} while(0)
++static int api,variant;static char dir[100],path[150];static int rootfd;
++static int capop(int fd,int op,int bits)
++{
++ union{uint64_t align;unsigned char b[sizeof(struct fd_cap_request)+1];}s={};
++ struct fd_cap_request*r=(void*)s.b;r->size=sizeof(s.b);r->version=FD_CAP_VERSION_1;r->rights[0]=bits;
++ int rc=fcntl(fd,op,r);return !rc&&op==F_GETFD_CAP?r->rights[0]:rc;
++}
++static int confine(void)
++{
++ union{uint64_t align;unsigned char b[sizeof(struct pr_capauth_confine)+1];}s={};
++ struct pr_capauth_confine*r=(void*)s.b;r->size=sizeof(s.b);r->version=PR_CAPAUTH_CONFINE_VERSION_1;r->handled[0]=0x18;
++ return prctl(PR_CAPAUTH,PR_CAPAUTH_CONFINE,(unsigned long)r,0UL,0UL);
++}
++static int setup(void)
++{
++ int fd;strcpy(dir,"/tmp/authority-est.XXXXXX");CHECK(mkdtemp(dir));rootfd=open(dir,O_PATH|O_DIRECTORY);CHECK(rootfd>=0);
++ snprintf(path,sizeof(path),"%s/file",dir);fd=open(path,O_CREAT|O_RDWR,0600);CHECK(fd>=0&&write(fd,"data",4)==4);close(fd);return 0;
++}
++static int pidfd_import(void)
++{
++ int ready[2],hold[2],remote,fd,pidfd,status;pid_t child;char c;
++ CHECK(!setup()&&!pipe(ready)&&!pipe(hold));child=fork();CHECK(child>=0);
++ if(!child){close(ready[0]);close(hold[1]);remote=open(path,O_RDWR);if(remote<0)_exit(1);
++  if(variant!=3&&capop(remote,F_RESTRICTFD_CAP,variant))_exit(1);
++  if(write(ready[1],&remote,sizeof(remote))!=sizeof(remote))_exit(1);
++  read(hold[0],&c,1);_exit(0);}
++ close(ready[1]);close(hold[0]);CHECK(read(ready[0],&remote,sizeof(remote))==sizeof(remote));
++ pidfd=syscall(SYS_pidfd_open,child,0);CHECK(pidfd>=0&&!confine());
++ errno=0;CHECK(open(path,O_RDONLY)==-1&&errno==EACCES);
++ fd=syscall(SYS_pidfd_getfd,pidfd,remote,0);CHECK(fd>=0&&capop(fd,F_GETFD_CAP,0)==variant);
++ if(variant&1)CHECK(pread(fd,&c,1,0)==1&&c=='d');else{errno=0;CHECK(pread(fd,&c,1,0)==-1&&errno==EBADF);}
++ if(variant&2)CHECK(pwrite(fd,"d",1,0)==1);else{errno=0;CHECK(pwrite(fd,"x",1,0)==-1&&errno==EBADF);}
++ char proc[120];snprintf(proc,sizeof(proc),"/proc/%d/fd/%d",child,remote);
++ errno=0;CHECK(open(proc,O_RDONLY)==-1&&errno==EACCES);
++ close(hold[1]);CHECK(waitpid(child,&status,0)==child&&WIFEXITED(status)&&!WEXITSTATUS(status));return 0;
++}
++static int opath(void)
++{
++ int fd;char proc[80];CHECK(!setup()&&!confine());fd=open(path,O_PATH);CHECK(fd>=0);
++ snprintf(proc,sizeof(proc),"/proc/self/fd/%d",fd);errno=0;CHECK(open(proc,O_RDONLY)==-1&&errno==EACCES);return 0;
++}
++static int notification(void)
++{
++ int fan,pipes[2],fd,status;pid_t child;char c;union{uint64_t a;char b[4096];}buf;
++ CHECK(!setup());fan=fanotify_init(FAN_CLASS_NOTIF|FAN_CLOEXEC|FAN_REPORT_FD_ERROR,O_RDONLY|O_LARGEFILE);CHECK(fan>=0);
++ CHECK(!fanotify_mark(fan,FAN_MARK_ADD,FAN_OPEN,AT_FDCWD,path)&&!pipe(pipes));
++ child=fork();CHECK(child>=0);if(!child){close(pipes[1]);if(read(pipes[0],&c,1)!=1)_exit(1);fd=open(path,O_RDONLY);if(fd<0)_exit(1);close(fd);_exit(0);}
++ close(pipes[0]);
++ if(variant==1)CHECK(!prctl(PR_CAPAUTH,PR_CAPAUTH_ADD_FS_SCOPE,(unsigned long)rootfd,(unsigned long)PR_CAPAUTH_FS_READ_FILE,0UL));
++ if(variant>=0)CHECK(!confine());
++ if(variant==0){errno=0;CHECK(open(path,O_RDONLY)==-1&&errno==EACCES);}
++ CHECK(write(pipes[1],"s",1)==1);
++ struct pollfd pollfd={.fd=fan,.events=POLLIN};CHECK(poll(&pollfd,1,3000)==1);
++ ssize_t n=read(fan,buf.b,sizeof(buf.b));CHECK(n>=(ssize_t)sizeof(struct fanotify_event_metadata));
++ struct fanotify_event_metadata *m=(void*)buf.b;CHECK(m->vers==FANOTIFY_METADATA_VERSION&&(m->mask&FAN_OPEN));
++ printf("# fanotify variant=%d delivered fd=%d\n",variant,m->fd);
++ if(variant==0)CHECK(m->fd==-EACCES);
++ else{CHECK(m->fd>=0&&read(m->fd,&c,1)==1&&c=='d');if(variant==1){CHECK(capop(m->fd,F_GETFD_CAP,0)==1&&!capop(m->fd,F_RESTRICTFD_CAP,0));errno=0;CHECK(read(m->fd,&c,1)==-1&&errno==EBADF);}}
++ CHECK(waitpid(child,&status,0)==child&&WIFEXITED(status)&&!WEXITSTATUS(status));return 0;
++}
++struct ring {int fd;struct io_uring_params p;void *sq,*cq;struct io_uring_sqe *sqes;};
++static int ring_setup(struct ring*r)
++{
++ memset(r,0,sizeof(*r));r->fd=syscall(SYS_io_uring_setup,4,&r->p);CHECK(r->fd>=0);
++ size_t ss=r->p.sq_off.array+r->p.sq_entries*sizeof(unsigned),cs=r->p.cq_off.cqes+r->p.cq_entries*sizeof(struct io_uring_cqe);
++ if(r->p.features&IORING_FEAT_SINGLE_MMAP){if(cs>ss)ss=cs;r->sq=mmap(0,ss,PROT_READ|PROT_WRITE,MAP_SHARED,r->fd,IORING_OFF_SQ_RING);r->cq=r->sq;}
++ else{r->sq=mmap(0,ss,PROT_READ|PROT_WRITE,MAP_SHARED,r->fd,IORING_OFF_SQ_RING);r->cq=mmap(0,cs,PROT_READ|PROT_WRITE,MAP_SHARED,r->fd,IORING_OFF_CQ_RING);}
++ CHECK(r->sq!=MAP_FAILED&&r->cq!=MAP_FAILED);
++ r->sqes=mmap(0,r->p.sq_entries*sizeof(*r->sqes),PROT_READ|PROT_WRITE,MAP_SHARED,r->fd,IORING_OFF_SQES);CHECK(r->sqes!=MAP_FAILED);return 0;
++}
++static int issue(struct ring*r,int opcode,int fd,void*data,int len,int fixed)
++{
++ unsigned *tail=r->sq+r->p.sq_off.tail,*mask=r->sq+r->p.sq_off.ring_mask,*array=r->sq+r->p.sq_off.array;
++ unsigned t=*tail,idx=t&*mask;struct io_uring_sqe*s=&r->sqes[idx];memset(s,0,sizeof(*s));
++ s->opcode=opcode;s->fd=fd;s->addr=(uintptr_t)data;s->len=len;if(fixed)s->flags=IOSQE_FIXED_FILE;
++ array[idx]=idx;__atomic_store_n(tail,t+1,__ATOMIC_RELEASE);
++ int rc=syscall(SYS_io_uring_enter,r->fd,1,1,IORING_ENTER_GETEVENTS,0,0);if(rc<0)return -10000-errno;
++ unsigned *head=r->cq+r->p.cq_off.head,*ct=r->cq+r->p.cq_off.tail,*cm=r->cq+r->p.cq_off.ring_mask;
++ if(*head==__atomic_load_n(ct,__ATOMIC_ACQUIRE))return -20000;
++ struct io_uring_cqe*c=r->cq+r->p.cq_off.cqes;int result=c[*head&*cm].res;__atomic_store_n(head,*head+1,__ATOMIC_RELEASE);return result;
++}
++static int uring(void)
++{
++ struct ring r;int fd,result;char c=0;CHECK(!setup()&&!ring_setup(&r));
++ fd=open(path,O_RDWR);CHECK(fd>=0);
++ if(variant){CHECK(!syscall(SYS_io_uring_register,r.fd,IORING_REGISTER_FILES,&fd,1));}
++ CHECK(!confine());
++ if(!variant){result=issue(&r,IORING_OP_OPENAT,AT_FDCWD,path,0,0);printf("# ring created before confinement OPENAT result=%d\n",result);CHECK(result==-EACCES);return 0;}
++ CHECK(!capop(fd,F_RESTRICTFD_CAP,1));
++ if(variant==2){int alias=dup(fd);struct io_uring_files_update u={.offset=0,.fds=(uintptr_t)&alias};CHECK(syscall(SYS_io_uring_register,r.fd,IORING_REGISTER_FILES_UPDATE,&u,1)==1);}
++ CHECK(issue(&r,IORING_OP_READ,0,&c,1,1)==1&&c=='d');
++ result=issue(&r,IORING_OP_WRITE,0,"x",1,1);CHECK(result==-EBADF||result==-EACCES);
++ CHECK(!capop(fd,F_RESTRICTFD_CAP,0));result=issue(&r,IORING_OP_READ,0,&c,1,1);CHECK(result==-EBADF||result==-EACCES);return 0;
++}
++static int anonymous(void)
++{
++ int fd;void *p;CHECK(!confine());fd=memfd_create("out-of-path-scope",MFD_CLOEXEC);CHECK(fd>=0&&!ftruncate(fd,4096)&&write(fd,"data",4)==4);
++ p=mmap(0,4096,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);CHECK(p!=MAP_FAILED);memcpy(p,"data",4);
++ CHECK(capop(fd,F_GETFD_CAP,0)==3);
++ int id=shmget(IPC_PRIVATE,4096,IPC_CREAT|0600);CHECK(id>=0);
++ void *shared=shmat(id,NULL,0);CHECK(shared!=(void*)-1);memcpy(shared,"data",4);
++ CHECK(!shmctl(id,IPC_RMID,NULL)&&!shmdt(shared));return 0;
++}
++int main(void)
++{
++ const struct{const char*name;int(*run)(void);int v,need;}cases[]={
++ {"pidfd imports full bearer; procfs reacquisition denies",pidfd_import,3,1},
++ {"pidfd imports READ-only shared attenuation",pidfd_import,1,1},{"pidfd imports zero-right shared attenuation",pidfd_import,0,1},
++ {"O_PATH is not data acquisition; procfs repeats acquisition",opath,0,1},
++ {"native fanotify readable description",notification,-1,0},{"fanotify denied fresh event descriptor",notification,0,1},
++ {"fanotify scoped fresh event descriptor attenuates",notification,1,1},
++ {"preexisting ordinary io_uring still checks fresh OPENAT",uring,0,1},
++ {"fixed io_uring registration shares later attenuation",uring,1,1},{"fixed io_uring update shares later attenuation",uring,2,1},
++ {"memfd is anonymous storage outside pathname scope",anonymous,0,1}};
++ int rc,status;pid_t pid;setvbuf(stdout,NULL,_IONBF,0);ksft_print_header();if(geteuid())ksft_exit_skip("requires isolated root guest\n");
++ errno=0;rc=prctl(PR_CAPAUTH,PR_CAPAUTH_GET_CONFINED,0UL,0UL,0UL);if(rc==-1&&errno!=EINVAL)ksft_exit_fail_msg("query error\n");if(rc>0)ksft_exit_fail_msg("already confined\n");api=rc==0;
++ ksft_set_plan(ARRAY_SIZE(cases));for(unsigned i=0;i<ARRAY_SIZE(cases);i++){
++  if(cases[i].need&&!api){ksft_test_result_skip("%s (API unavailable)\n",cases[i].name);continue;}
++  variant=cases[i].v;pid=fork();CHECK(pid>=0);if(!pid)_exit(cases[i].run());CHECK(waitpid(pid,&status,0)==pid);
++  ksft_test_result(WIFEXITED(status)&&!WEXITSTATUS(status),"%s\n",cases[i].name);
++ }ksft_finished();
++}
+diff --git a/tools/testing/selftests/authority/handle_test.c b/tools/testing/selftests/authority/handle_test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..2407fff15679cfc345009bb7416d7a2473590427
+--- /dev/null
++++ b/tools/testing/selftests/authority/handle_test.c
+@@ -0,0 +1,67 @@
++// SPDX-License-Identifier: GPL-2.0
++#define _GNU_SOURCE
++#include <errno.h>
++#include <fcntl.h>
++#include <linux/prctl.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++#include <sys/ioctl.h>
++#include <sys/prctl.h>
++#include <sys/stat.h>
++#include <sys/statfs.h>
++#include <sys/wait.h>
++#include <unistd.h>
++#include "../kselftest.h"
++#define CHECK(c) do{if(!(c)){dprintf(2,"# %s:%d %s errno=%d\n",__func__,__LINE__,#c,errno);return 1;}}while(0)
++/* Exact native xfs_fsop_handlereq layout, without kernel-private types. */
++struct request {uint32_t fd;void *path;uint32_t oflags;void *ihandle;uint32_t ihandlen;void *ohandle;uint32_t *ohandlen;};
++#define PATH_HANDLE _IOWR('X',105,struct request)
++#define OPEN_HANDLE _IOWR('X',107,struct request)
++static int api,rootfd;static char path[180],directory[]="/mnt/xfs/authority-handle.XXXXXX";
++static int confined(int right,int grant)
++{
++ if(grant)CHECK(!prctl(PR_CAPAUTH,PR_CAPAUTH_ADD_FS_SCOPE,(unsigned long)rootfd,(unsigned long)right,0UL));
++ union{uint64_t a;unsigned char b[sizeof(struct pr_capauth_confine)+1];}s={};
++ struct pr_capauth_confine*r=(void*)s.b;r->size=sizeof(s.b);r->version=PR_CAPAUTH_CONFINE_VERSION_1;r->handled[0]=0x18;
++ return prctl(PR_CAPAUTH,PR_CAPAUTH_CONFINE,(unsigned long)r,0UL,0UL);
++}
++static int run(int use_ioctl,int write_mode,int policy,int grant)
++{
++ int fd,mount_id=0;char c=0;struct stat st;
++ union{uint64_t a;unsigned char b[sizeof(struct file_handle)+128];}fh={};
++ struct file_handle*h=(void*)fh.b;h->handle_bytes=128;
++ unsigned char xhandle[128];uint32_t xlen=sizeof(xhandle);
++ struct request req={.path=path,.ohandle=xhandle,.ohandlen=&xlen};
++ if(use_ioctl)CHECK(!ioctl(rootfd,PATH_HANDLE,&req));else CHECK(!name_to_handle_at(AT_FDCWD,path,h,&mount_id,0));
++ if(policy)CHECK(!confined(write_mode?PR_CAPAUTH_FS_WRITE_FILE:PR_CAPAUTH_FS_READ_FILE,grant));
++ errno=0;
++ if(use_ioctl){req.ihandle=xhandle;req.ihandlen=xlen;req.oflags=write_mode?O_WRONLY:O_RDONLY;fd=ioctl(rootfd,OPEN_HANDLE,&req);}
++ else fd=open_by_handle_at(rootfd,h,write_mode?O_WRONLY:O_RDONLY);
++ printf("# %s %s policy=%d grant=%d result=%d errno=%d\n",use_ioctl?"xfs-ioctl":"generic",write_mode?"WRITE":"READ",policy,grant,fd,fd<0?errno:0);
++ if(policy&&!grant){CHECK(fd==-1&&errno==EACCES);CHECK(!stat(path,&st)&&st.st_size==4);return 0;}
++ CHECK(fd>=0);if(write_mode)CHECK(pwrite(fd,"d",1,0)==1);else CHECK(pread(fd,&c,1,0)==1&&c=='d');
++ return 0;
++}
++int main(void)
++{
++ int rc,fd,status;pid_t child;
++ setvbuf(stdout,NULL,_IONBF,0);ksft_print_header();if(geteuid())ksft_exit_skip("requires root disposable XFS guest\n");
++ struct statfs fs;
++ if(statfs("/mnt/xfs",&fs)||fs.f_type!=0x58465342)
++  ksft_exit_skip("requires dedicated disposable XFS fixture at /mnt/xfs\n");
++ CHECK(mkdtemp(directory));snprintf(path,sizeof(path),"%s/fixture",directory);
++ rootfd=open(directory,O_RDONLY|O_DIRECTORY);CHECK(rootfd>=0);
++ fd=open(path,O_CREAT|O_RDWR|O_TRUNC,0600);CHECK(fd>=0&&write(fd,"data",4)==4);close(fd);
++ errno=0;rc=prctl(PR_CAPAUTH,PR_CAPAUTH_GET_CONFINED,0UL,0UL,0UL);
++ if(rc==-1&&errno!=EINVAL)ksft_exit_fail_msg("Authority query error\n");
++ if(rc>0)ksft_exit_fail_msg("already confined\n");
++ api=rc==0;
++ ksft_set_plan(12);
++ for(int ioctl_mode=0;ioctl_mode<2;ioctl_mode++)for(int w=0;w<2;w++)for(int state=0;state<3;state++){
++  if(state&&!api){ksft_test_result_skip("%s %s %s (API unavailable)\n",ioctl_mode?"XFS ioctl":"generic",w?"WRITE":"READ",state==1?"denied":"granted");continue;}
++  child=fork();CHECK(child>=0);if(!child)_exit(run(ioctl_mode,w,state!=0,state==2));
++  CHECK(waitpid(child,&status,0)==child);ksft_test_result(WIFEXITED(status)&&!WEXITSTATUS(status),"%s %s %s\n",ioctl_mode?"XFS ioctl":"generic",w?"WRITE":"READ",state==0?"native":state==1?"denied":"granted");
++ }CHECK(!unlink(path));close(rootfd);CHECK(!rmdir(directory));ksft_finished();
++}
+diff --git a/tools/testing/selftests/authority/idmapped_test.c b/tools/testing/selftests/authority/idmapped_test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..409bbd4c33049eea6f06b82f5965741d8388fa66
+--- /dev/null
++++ b/tools/testing/selftests/authority/idmapped_test.c
+@@ -0,0 +1,205 @@
++// SPDX-License-Identifier: GPL-2.0
++#define _GNU_SOURCE
++#include <errno.h>
++#include <fcntl.h>
++#define _ASM_GENERIC_FCNTL_H
++#define F_LINUX_SPECIFIC_BASE 1024
++#include <linux/fcntl.h>
++#include <linux/mount.h>
++#include <linux/prctl.h>
++#include <linux/posix_acl_xattr.h>
++#include <sched.h>
++#include <signal.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mount.h>
++#include <sys/prctl.h>
++#include <sys/stat.h>
++#include <sys/syscall.h>
++#include <sys/wait.h>
++#include <sys/xattr.h>
++#include <unistd.h>
++#include "../kselftest.h"
++#define CHECK(c) do { if (!(c)) { dprintf(2,"# %s:%d %s errno=%d\n",__func__,__LINE__,#c,errno); return 1; } } while (0)
++static int api, managed, plain, mapped, dfd, ofd;
++static char base[128], ppath[160], mpath[160];
++static int capop(int fd,int op,unsigned char bits)
++{
++ union {uint64_t align;unsigned char bytes[sizeof(struct fd_cap_request)+1];} s={};
++ struct fd_cap_request *r=(void *)s.bytes;
++ r->size=sizeof(s.bytes);r->version=FD_CAP_VERSION_1;r->rights[0]=bits;
++ int rc=fcntl(fd,op,r);
++ return !rc&&op==F_GETFD_CAP?r->rights[0]:rc;
++}
++static int confine(unsigned char mask)
++{
++ if(!managed)return 0;
++ union {uint64_t align;unsigned char bytes[sizeof(struct pr_capauth_confine)+1];} s={};
++ struct pr_capauth_confine *r=(void *)s.bytes;
++ r->size=sizeof(s.bytes);r->version=PR_CAPAUTH_CONFINE_VERSION_1;r->handled[0]=mask;
++ return prctl(PR_CAPAUTH,PR_CAPAUTH_CONFINE,(unsigned long)r,0UL,0UL);
++}
++static int scope(int fd,int right)
++{
++ return managed?prctl(PR_CAPAUTH,PR_CAPAUTH_ADD_FS_SCOPE,(unsigned long)fd,(unsigned long)right,0UL):0;
++}
++static int text(const char *path,const char *value)
++{
++ int fd=open(path,O_WRONLY);if(fd<0)return -1;
++ ssize_t n=write(fd,value,strlen(value));close(fd);return n==(ssize_t)strlen(value)?0:-1;
++}
++static int userns(void)
++{
++ int ready[2],hold[2],ns,status;pid_t pid;char path[100],c;
++ if(pipe(ready)||pipe(hold))return -1;
++ pid=fork();if(pid<0)return -1;
++ if(!pid){close(ready[0]);close(hold[1]);if(unshare(CLONE_NEWUSER))_exit(1);if(write(ready[1],"r",1)!=1)_exit(1);read(hold[0],&c,1);_exit(0);}
++ close(ready[1]);close(hold[0]);
++ if(read(ready[0],&c,1)!=1){waitpid(pid,&status,0);return -1;}
++ snprintf(path,sizeof(path),"/proc/%d/setgroups",pid);if(text(path,"deny\n"))goto fail;
++ snprintf(path,sizeof(path),"/proc/%d/uid_map",pid);if(text(path,"0 1000 1\n"))goto fail;
++ snprintf(path,sizeof(path),"/proc/%d/gid_map",pid);if(text(path,"0 1000 1\n"))goto fail;
++ snprintf(path,sizeof(path),"/proc/%d/ns/user",pid);ns=open(path,O_RDONLY|O_CLOEXEC);
++ close(hold[1]);close(ready[0]);waitpid(pid,&status,0);return ns;
++fail:
++ close(hold[1]);close(ready[0]);waitpid(pid,&status,0);return -1;
++}
++static int setup(void)
++{
++ int ns,tree,fd;struct mount_attr attr={};
++ CHECK(!unshare(CLONE_NEWNS));CHECK(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
++ strcpy(base,"/tmp/authority-map.XXXXXX");CHECK(mkdtemp(base));CHECK(!chmod(base,0755));
++ snprintf(ppath,sizeof(ppath),"%s/plain",base);snprintf(mpath,sizeof(mpath),"%s/mapped",base);
++ CHECK(!mkdir(ppath,0755)&&!mkdir(mpath,0755));CHECK(!mount("tmpfs",ppath,"tmpfs",0,"mode=0755"));
++ plain=open(ppath,O_PATH|O_DIRECTORY);CHECK(plain>=0);
++ CHECK(!mkdirat(plain,"d",0777)&&!mkdirat(plain,"other",0777));
++ CHECK(!fchmodat(plain,"d",0777,0)&&!fchmodat(plain,"other",0777,0));
++ fd=openat(plain,"f",O_CREAT|O_RDWR,0600);CHECK(fd>=0&&write(fd,"data",4)==4);close(fd);
++ CHECK(!mkdirat(plain,"hidden",0700));
++ fd=openat(plain,"hidden/f",O_CREAT|O_RDWR,0600);CHECK(fd>=0);close(fd);
++ CHECK(!fchmodat(plain,"hidden",0000,0));
++ ns=userns();CHECK(ns>=0);
++ tree=syscall(SYS_open_tree,AT_FDCWD,ppath,OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC);CHECK(tree>=0);
++ attr.attr_set=MOUNT_ATTR_IDMAP;attr.userns_fd=ns;
++ CHECK(!syscall(SYS_mount_setattr,tree,"",AT_EMPTY_PATH,&attr,sizeof(attr)));
++ CHECK(!syscall(SYS_move_mount,tree,"",AT_FDCWD,mpath,MOVE_MOUNT_F_EMPTY_PATH));
++ errno=0;int remap=syscall(SYS_mount_setattr,tree,"",AT_EMPTY_PATH,&attr,sizeof(attr));
++ printf("# existing mapped mount re-idmap ret=%d errno=%d\n",remap,errno);
++ CHECK(remap==-1&&(errno==EPERM||errno==EINVAL||errno==EBUSY));close(ns);close(tree);
++ mapped=open(mpath,O_PATH|O_DIRECTORY);CHECK(mapped>=0);
++ dfd=openat(mapped,"d",O_PATH|O_DIRECTORY);ofd=openat(mapped,"other",O_PATH|O_DIRECTORY);CHECK(dfd>=0&&ofd>=0);
++ return 0;
++}
++static int drop(void){return setgid(1000)||setuid(1000);}
++static int identity(void)
++{
++ struct stat a,b;int fd,alias;char c;
++ CHECK(!setup());CHECK(!fstatat(plain,"f",&a,0)&&!fstatat(mapped,"f",&b,0));
++ CHECK(a.st_ino==b.st_ino&&a.st_dev==b.st_dev&&a.st_uid==0&&b.st_uid==1000&&b.st_gid==1000);
++ CHECK(!confine(0)&&!drop());errno=0;CHECK(openat(plain,"f",O_RDONLY)==-1&&errno==EACCES);
++ errno=0;CHECK(openat(mapped,"hidden/f",O_RDONLY)==-1&&errno==EACCES);
++ fd=openat(mapped,"f",O_RDWR);CHECK(fd>=0);alias=dup(fd);CHECK(alias>=0&&pread(alias,&c,1,0)==1&&c=='d');
++ CHECK(!ftruncate(fd,2));CHECK(!fstat(alias,&b)&&b.st_size==2);return 0;
++}
++static int ceiling(void)
++{
++ int fd,clone,alias;char c;
++ CHECK(!setup()&&!scope(plain,PR_CAPAUTH_FS_READ_FILE));
++ CHECK(!fchmodat(plain,"f",0000,0));CHECK(!confine(0x18)&&!drop());
++ errno=0;CHECK(openat(plain,"hidden/f",O_RDONLY)==-1&&errno==EACCES);
++ fd=openat(plain,"f",O_RDONLY);CHECK(fd>=0&&pread(fd,&c,1,0)==1&&c=='d');
++ errno=0;CHECK(openat(mapped,"f",O_RDONLY)==-1&&errno==EACCES);
++ clone=capop(fd,F_CLONEFD_CAP,3);CHECK(clone>=0&&capop(clone,F_GETFD_CAP,0)==1);
++ CHECK(lseek(fd,1,SEEK_SET)==1&&read(clone,&c,1)==1&&c=='d');
++ alias=dup(clone);CHECK(alias>=0&&!capop(clone,F_RESTRICTFD_CAP,0));
++ errno=0;CHECK(read(alias,&c,1)==-1&&errno==EBADF);CHECK(read(fd,&c,1)==1&&c=='a');
++ return 0;
++}
++static int mapped_data(void)
++{
++ int fd,clone;char c;
++ CHECK(!setup()&&!scope(mapped,PR_CAPAUTH_FS_READ_FILE)&&!scope(mapped,PR_CAPAUTH_FS_WRITE_FILE));
++ CHECK(!confine(0x18)&&!drop());fd=openat(mapped,"f",O_RDWR);CHECK(fd>=0);
++ CHECK(!ftruncate(fd,3)&&pwrite(fd,"d",1,0)==1);
++ errno=0;CHECK(openat(plain,"f",O_RDONLY)==-1&&errno==EACCES);
++ clone=capop(fd,F_CLONEFD_CAP,1);CHECK(clone>=0&&capop(clone,F_GETFD_CAP,0)==1&&pread(clone,&c,1,0)==1);
++ errno=0;CHECK(pwrite(clone,"x",1,0)==-1&&errno==EBADF);
++ errno=0;CHECK(ftruncate(clone,0)==-1&&(errno==EBADF||errno==EACCES));return 0;
++}
++static int namespace_ops(void)
++{
++ struct stat st;int fd,otherplain;char buf[4];
++ CHECK(!setup());
++ for(int r=1;r<=7;r++){if(r==2)continue;CHECK(!scope(dfd,r)&&!scope(ofd,r));}
++ otherplain=openat(plain,"d",O_PATH|O_DIRECTORY);CHECK(otherplain>=0);
++ CHECK(!confine(0xfa)&&!drop());
++ fd=openat(dfd,"new",O_CREAT|O_EXCL|O_RDWR,0600);CHECK(fd>=0&&write(fd,"data",4)==4);
++ CHECK(!fstatat(dfd,"new",&st,0)&&st.st_uid==1000&&st.st_gid==1000);
++ CHECK(!fstatat(otherplain,"new",&st,0)&&st.st_uid==0&&st.st_gid==0);
++ CHECK(!linkat(dfd,"new",ofd,"linked",0));
++ errno=0;CHECK(linkat(dfd,"new",otherplain,"cross",0)==-1&&errno==EXDEV);
++ errno=0;CHECK(syscall(SYS_renameat2,dfd,"new",otherplain,"cross",0)==-1&&errno==EXDEV);
++ CHECK(!syscall(SYS_renameat2,dfd,"new",ofd,"moved",RENAME_NOREPLACE));
++ errno=0;CHECK(syscall(SYS_renameat2,ofd,"moved",ofd,"linked",RENAME_NOREPLACE)==-1&&errno==EEXIST);
++ CHECK(!syscall(SYS_renameat2,ofd,"moved",ofd,"linked",RENAME_EXCHANGE));
++ CHECK(!fchmod(fd,0400)&&!ftruncate(fd,2));
++ CHECK(!unlinkat(ofd,"linked",0)&&!unlinkat(ofd,"moved",0));
++ CHECK(pread(fd,buf,2,0)==2&&!memcmp(buf,"da",2));return 0;
++}
++static int acl(void)
++{
++ struct {struct posix_acl_xattr_header h;struct posix_acl_xattr_entry e[5];} a={};
++ int fd;
++ CHECK(!setup());fd=openat(plain,"a",O_CREAT|O_RDWR,0600);CHECK(fd>=0);
++ a.h.a_version=2;
++ unsigned short tags[]={1,2,4,16,32}, perms[]={0,4,0,4,0};
++ for(int i=0;i<5;i++){a.e[i].e_tag=tags[i];a.e[i].e_perm=perms[i];a.e[i].e_id=i==1?1000:0xffffffffU;}
++ CHECK(!fsetxattr(fd,"system.posix_acl_access",&a,sizeof(a),0));close(fd);
++ CHECK(!scope(mapped,PR_CAPAUTH_FS_READ_FILE)&&!confine(0x08)&&!drop());
++ errno=0;fd=openat(plain,"a",O_RDONLY);
++ if(managed){CHECK(fd==-1&&errno==EACCES);fd=openat(mapped,"a",O_RDONLY);CHECK(fd>=0);}
++ else {CHECK(fd>=0);errno=0;CHECK(openat(mapped,"a",O_RDONLY)==-1&&errno==EACCES);}
++ return 0;
++}
++static int nested_userns(void)
++{
++ CHECK(!setup());
++ CHECK(!unshare(CLONE_NEWUSER));
++ errno=0;
++ CHECK(prctl(PR_CAPAUTH,PR_CAPAUTH_ADD_FS_SCOPE,(unsigned long)plain,
++             (unsigned long)PR_CAPAUTH_FS_READ_FILE,0UL)==-1&&errno==EPERM);
++ return 0;
++}
++int main(void)
++{
++ const struct {const char *name;int (*run)(void);int mode;} cases[]={
++ {"native idmap identity DAC traversal dup truncate",identity,0},
++ {"unhandled idmap identity DAC traversal dup truncate",identity,1},
++ {"handled scope cannot cross idmapped alias; clone attenuation",ceiling,1},
++ {"mapped scope DATA ceiling and read-only derivation",mapped_data,1},
++ {"native mapped create ownership link rename unlink lifetime",namespace_ops,0},
++ {"managed mapped create ownership link rename unlink lifetime",namespace_ops,1},
++ {"native ACL identity translation",acl,0},{"handled ACL scope ceiling and generic DAC grant",acl,1},
++ {"nested userns root cannot manufacture initial-userns Authority scopes",nested_userns,1}};
++ int rc,status;pid_t pid;
++ setvbuf(stdout,NULL,_IONBF,0);ksft_print_header();if(geteuid())ksft_exit_skip("requires isolated root guest\n");
++ errno=0;rc=prctl(PR_CAPAUTH,PR_CAPAUTH_GET_CONFINED,0UL,0UL,0UL);
++ if(rc==-1&&errno!=EINVAL)ksft_exit_fail_msg("Authority query error %d\n",errno);
++ if(rc>0)ksft_exit_fail_msg("requires initially unconfined process\n");
++ api=rc==0;
++ /* Namespace setup is a prerequisite, checked before target assertions. */
++ pid=fork();CHECK(pid>=0);
++ if(!pid)_exit((unshare(CLONE_NEWNS)||unshare(CLONE_NEWUSER))?4:0);
++ CHECK(waitpid(pid,&status,0)==pid);
++ if(!WIFEXITED(status)||WEXITSTATUS(status))
++  ksft_exit_skip("user/mount namespace setup unavailable in this environment\n");
++ ksft_set_plan(ARRAY_SIZE(cases));
++ for(unsigned i=0;i<ARRAY_SIZE(cases);i++){
++  if(cases[i].mode&&!api){ksft_test_result_skip("%s (custom API unavailable)\n",cases[i].name);continue;}
++  managed=cases[i].mode;pid=fork();CHECK(pid>=0);if(!pid)_exit(cases[i].run());
++  CHECK(waitpid(pid,&status,0)==pid);ksft_test_result(WIFEXITED(status)&&!WEXITSTATUS(status),"%s\n",cases[i].name);
++ }
++ ksft_finished();
++}
+diff --git a/tools/testing/selftests/authority/qualification_test.c b/tools/testing/selftests/authority/qualification_test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb4c0a14fbc80d522f98e3f3c6856a7aa0de32f8
+--- /dev/null
++++ b/tools/testing/selftests/authority/qualification_test.c
+@@ -0,0 +1,775 @@
++// SPDX-License-Identifier: GPL-2.0
++#define _GNU_SOURCE
++#include <errno.h>
++#include <fcntl.h>
++/* Use the prototype UAPI without redeclaring libc's flock structures. */
++#define _ASM_GENERIC_FCNTL_H
++#define F_LINUX_SPECIFIC_BASE 1024
++#include <linux/fcntl.h>
++#include <linux/landlock.h>
++#include <linux/openat2.h>
++#include <linux/prctl.h>
++#include <pthread.h>
++#include <sched.h>
++#include <stdatomic.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <sys/mount.h>
++#include <sys/prctl.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/fsuid.h>
++#include <sys/xattr.h>
++#include <sys/syscall.h>
++#include <sys/wait.h>
++#include <unistd.h>
++#include "../kselftest.h"
++
++#define READ_SCOPE PR_CAPAUTH_FS_READ_FILE
++#define WRITE_SCOPE PR_CAPAUTH_FS_WRITE_FILE
++#define ALL_OPS 0xfa
++#ifndef TEST_FS
++#define TEST_FS "tmpfs"
++#endif
++#define CHECK(x) do { if (!(x)) { \
++	dprintf(2, "# %s:%d: %s errno=%d\n", __func__, __LINE__, #x, errno); \
++	return 1; } } while (0)
++#define DENIED(x, e) do { errno = 0; CHECK((x) == -1 && errno == (e)); } while (0)
++
++static int rootfd, inside, outside, datafd;
++static const char *self;
++
++static int confine(unsigned char bits)
++{
++	union {
++		uint64_t align;
++		unsigned char bytes[sizeof(struct pr_capauth_confine) + 1];
++	} storage = {};
++	struct pr_capauth_confine *r = (void *)storage.bytes;
++
++	r->size = sizeof(storage.bytes);
++	r->version = PR_CAPAUTH_CONFINE_VERSION_1;
++	r->handled[0] = bits;
++	return prctl(PR_CAPAUTH, PR_CAPAUTH_CONFINE, (unsigned long)r, 0, 0);
++}
++
++static int scope(int fd, int right)
++{
++	return prctl(PR_CAPAUTH, PR_CAPAUTH_ADD_FS_SCOPE,
++		     (unsigned long)fd, (unsigned long)right, 0);
++}
++
++static int capop(int fd, int cmd, unsigned char mask)
++{
++	union {
++		uint64_t align;
++		unsigned char bytes[sizeof(struct fd_cap_request) + 1];
++	} storage = {};
++	struct fd_cap_request *r = (void *)storage.bytes;
++	int ret;
++
++	r->size = sizeof(storage.bytes);
++	r->version = FD_CAP_VERSION_1;
++	r->rights[0] = mask;
++	ret = fcntl(fd, cmd, r);
++	return cmd == F_GETFD_CAP && !ret ? r->rights[0] : ret;
++}
++
++static int open2(int dir, const char *name, uint64_t flags, uint64_t resolve)
++{
++	struct open_how how = { .flags = flags, .resolve = resolve };
++
++	return syscall(SYS_openat2, dir, name, &how, sizeof(how));
++}
++
++/* mode 0: ordinary Linux, 1: empty selective domain, 2: denied, 3: grant. */
++static int path_matrix(int mode)
++{
++	int fd, ret, r;
++	char absolute[256];
++	struct stat st;
++	struct statx sx;
++
++	if (mode == 3)
++		for (r = 1; r <= 7; r++)
++			if (r != PR_CAPAUTH_FS_TRAVERSE)
++				CHECK(!scope(inside, r));
++	if (mode)
++		CHECK(!confine(mode == 1 ? 0 : ALL_OPS));
++	CHECK(!fchdir(rootfd));
++	CHECK(getcwd(absolute, sizeof(absolute)));
++	CHECK(strlen(absolute) + 10 < sizeof(absolute));
++	strcat(absolute, "/in/file");
++	for (r = 0; r < 3; r++) {
++		fd = r == 0 ? open(absolute, O_RDWR) : r == 1 ?
++			openat(inside, "file", O_RDWR) : open2(inside, "file", O_RDWR, 0);
++		if (mode == 2) {
++			CHECK(fd == -1 && errno == EACCES);
++		} else {
++			CHECK(fd >= 0);
++			CHECK(pwrite(fd, "A", 1, 0) == 1);
++			CHECK(!ftruncate(fd, 3));
++			CHECK(!fstat(fd, &st) && st.st_size == 3);
++			close(fd);
++		}
++	}
++	/* Metadata, mkdir/rmdir and symlink are deliberately not handled rights. */
++	CHECK(!stat(absolute, &st));
++	CHECK(!statx(inside, "file", 0, STATX_SIZE, &sx));
++	CHECK(!mkdirat(inside, "directory", 0700));
++	CHECK(!unlinkat(inside, "directory", AT_REMOVEDIR));
++	CHECK(!mkdir("in/directory", 0700));
++	CHECK(!rmdir("in/directory"));
++	CHECK(!symlinkat("file", inside, "sym"));
++	CHECK(!symlink("file", "in/sym2"));
++	ret = truncate(absolute, 2);
++	if (mode == 2)
++		CHECK(ret == -1 && errno == EACCES && st.st_size == 4);
++	else
++		CHECK(!ret);
++	fd = openat(inside, "created", O_CREAT | O_EXCL | O_WRONLY, 0600);
++	if (mode == 2) {
++		CHECK(fd == -1 && errno == EACCES);
++		DENIED(fstatat(inside, "created", &st, 0), ENOENT);
++	} else {
++		CHECK(fd >= 0);
++		close(fd);
++	}
++	ret = link("in/file", "in/hard");
++	if (mode == 2) {
++		CHECK(ret == -1 && errno == EACCES);
++		DENIED(fstatat(inside, "hard", &st, 0), ENOENT);
++	} else {
++		CHECK(!ret);
++		CHECK(!linkat(inside, "file", inside, "hard2", 0));
++	}
++	ret = rename("in/victim", "in/renamed");
++	if (mode == 2) {
++		CHECK(ret == -1 && errno == EACCES);
++		CHECK(!fstatat(inside, "victim", &st, 0));
++		DENIED(fstatat(inside, "renamed", &st, 0), ENOENT);
++	} else {
++		CHECK(!ret);
++		CHECK(!syscall(SYS_renameat2, inside, "renamed", inside, "victim", 0));
++	}
++	ret = unlink("in/victim");
++	if (mode == 2) {
++		CHECK(ret == -1 && errno == EACCES);
++		DENIED(unlinkat(inside, "victim", 0), EACCES);
++		CHECK(!fstatat(inside, "victim", &st, 0));
++	} else {
++		CHECK(!ret);
++		CHECK(!unlinkat(inside, "sym", 0));
++	}
++	/* An allowed directory never confers fresh data/creation rights outside it. */
++	if (mode >= 2) {
++		DENIED(openat(outside, "file", O_WRONLY), EACCES);
++		DENIED(openat(outside, "new", O_CREAT | O_WRONLY, 0600), EACCES);
++		DENIED(fstatat(outside, "new", &st, 0), ENOENT);
++		DENIED(linkat(inside, "file", outside, "newlink", 0), EACCES);
++		DENIED(fstatat(outside, "newlink", &st, 0), ENOENT);
++	}
++	return 0;
++}
++
++static int legacy(void) { return path_matrix(0); }
++static int unhandled(void) { return path_matrix(1); }
++static int denied(void) { return path_matrix(2); }
++static int allowed(void) { return path_matrix(3); }
++
++static int resolution(void)
++{
++	int fd;
++
++	CHECK(!symlinkat("../out/file", inside, "escape"));
++	CHECK(!scope(inside, READ_SCOPE));
++	CHECK(!confine(1U << READ_SCOPE));
++	DENIED(openat(inside, "escape", O_RDONLY), EACCES);
++	DENIED(openat(inside, "../out/file", O_RDONLY), EACCES);
++	DENIED(open2(inside, "escape", O_RDONLY, RESOLVE_BENEATH), EXDEV);
++	DENIED(open2(inside, "../out/file", O_RDONLY, RESOLVE_BENEATH), EXDEV);
++	DENIED(open2(inside, "/file", O_RDONLY, RESOLVE_BENEATH), EXDEV);
++	fd = open2(inside, "/file", O_RDONLY, RESOLVE_IN_ROOT);
++	CHECK(fd >= 0);
++	close(fd);
++	fd = open2(inside, "../file", O_RDONLY, RESOLVE_IN_ROOT);
++	CHECK(fd >= 0);
++	close(fd);
++	DENIED(open2(inside, "escape", O_RDONLY, RESOLVE_IN_ROOT), ENOENT);
++	/* Traversal and metadata visibility outside scopes are NOT confinement. */
++	CHECK(!fchdir(outside));
++	return 0;
++}
++
++static int object_binding(void)
++{
++	int replacement, fd;
++
++	CHECK(!scope(inside, READ_SCOPE));
++	CHECK(!renameat(rootfd, "in", rootfd, "moved"));
++	CHECK(!mkdirat(rootfd, "in", 0700));
++	replacement = openat(rootfd, "in", O_DIRECTORY);
++	CHECK(replacement >= 0);
++	fd = openat(replacement, "file", O_CREAT | O_RDWR, 0600);
++	CHECK(fd >= 0);
++	close(fd);
++	/* Reuse the old scope handle number for a different object. */
++	CHECK(dup2(replacement, inside) == inside);
++	CHECK(!confine(1U << READ_SCOPE));
++	DENIED(openat(inside, "file", O_RDONLY), EACCES);
++	fd = openat(rootfd, "moved/file", O_RDONLY);
++	CHECK(fd >= 0);
++	close(fd);
++	return 0;
++}
++
++static int private_mountns(char *path, size_t size)
++{
++	char procpath[80];
++	ssize_t len;
++
++	snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", rootfd);
++	len = readlink(procpath, path, size - 1);
++	CHECK(len > 0 && (size_t)len < size - 1);
++	path[len] = 0;
++	CHECK(!unshare(CLONE_NEWNS));
++	CHECK(!mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL));
++	/* Inherited FDs pin the OLD namespace's mounts, not their new clones. */
++	close(rootfd);
++	close(inside);
++	rootfd = open(path, O_PATH | O_DIRECTORY);
++	CHECK(rootfd >= 0);
++	inside = openat(rootfd, "in", O_PATH | O_DIRECTORY);
++	CHECK(inside >= 0);
++	return 0;
++}
++
++static int mount_binding(void)
++{
++	char path[256], src[300], dst[300];
++	int alias;
++
++	CHECK(!private_mountns(path, sizeof(path)));
++	snprintf(src, sizeof(src), "%s/in", path);
++	snprintf(dst, sizeof(dst), "%s/out", path);
++	CHECK(!mount(src, dst, NULL, MS_BIND, NULL));
++	alias = openat(rootfd, "out", O_PATH | O_DIRECTORY);
++	CHECK(alias >= 0);
++	CHECK(!scope(inside, READ_SCOPE));
++	CHECK(!confine(1U << READ_SCOPE));
++	DENIED(openat(alias, "file", O_RDONLY), EACCES);
++	return 0;
++}
++
++static int attenuation(void)
++{
++	char c;
++	int alias, clone, zero, replacement;
++
++	CHECK(!capop(datafd, F_RESTRICTFD_CAP, 1));
++	alias = dup(datafd);
++	CHECK(alias >= 0 && capop(alias, F_GETFD_CAP, 0) == 1);
++	DENIED(write(alias, "!", 1), EBADF);
++	DENIED(pwrite(alias, "!", 1, 0), EBADF);
++	DENIED(ftruncate(alias, 0), EBADF);
++	CHECK(!capop(alias, F_RESTRICTFD_CAP, 3));
++	CHECK(capop(alias, F_GETFD_CAP, 0) == 1);
++	clone = capop(alias, F_CLONEFD_CAP, 3);
++	CHECK(clone >= 0 && capop(clone, F_GETFD_CAP, 0) == 1);
++	DENIED(pwrite(clone, "!", 1, 0), EBADF);
++	CHECK(pread(clone, &c, 1, 0) == 1 && c == 'd');
++	CHECK(!capop(alias, F_RESTRICTFD_CAP, 0));
++	CHECK(capop(datafd, F_GETFD_CAP, 0) == 0);
++	CHECK(capop(clone, F_GETFD_CAP, 0) == 1);
++	zero = capop(datafd, F_CLONEFD_CAP, 3);
++	CHECK(zero >= 0 && capop(zero, F_GETFD_CAP, 0) == 0);
++	DENIED(read(zero, &c, 1), EBADF);
++	close(datafd);
++	replacement = openat(inside, "file", O_RDWR);
++	CHECK(replacement == datafd);
++	CHECK(capop(replacement, F_GETFD_CAP, 0) == 3);
++	CHECK(capop(alias, F_GETFD_CAP, 0) == 0);
++	return 0;
++}
++
++static int bearer(void)
++{
++	int pair[2], received = -1, status;
++	char c = 'x';
++	union {
++		struct cmsghdr align;
++		char bytes[CMSG_SPACE(sizeof(int))];
++	} control = {};
++	struct iovec iov = { &c, 1 };
++	struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1,
++		.msg_control = control.bytes, .msg_controllen = sizeof(control.bytes) };
++	struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
++	pid_t pid;
++
++	CHECK(!socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
++	CHECK(!capop(datafd, F_RESTRICTFD_CAP, 1));
++	cm->cmsg_level = SOL_SOCKET;
++	cm->cmsg_type = SCM_RIGHTS;
++	cm->cmsg_len = CMSG_LEN(sizeof(int));
++	memcpy(CMSG_DATA(cm), &datafd, sizeof(datafd));
++	CHECK(sendmsg(pair[0], &msg, 0) == 1);
++	CHECK(recvmsg(pair[1], &msg, 0) == 1);
++	cm = CMSG_FIRSTHDR(&msg);
++	CHECK(cm && cm->cmsg_type == SCM_RIGHTS && !(msg.msg_flags & MSG_CTRUNC));
++	memcpy(&received, CMSG_DATA(cm), sizeof(received));
++	CHECK(capop(received, F_GETFD_CAP, 0) == 1);
++	CHECK(!confine((1U << READ_SCOPE) | (1U << WRITE_SCOPE)));
++	DENIED(openat(inside, "file", O_RDONLY), EACCES);
++	CHECK(pread(received, &c, 1, 0) == 1 && c == 'd');
++	DENIED(pwrite(received, "!", 1, 0), EBADF);
++	pid = fork();
++	CHECK(pid >= 0);
++	if (!pid) {
++		char number[32];
++
++		snprintf(number, sizeof(number), "%d", received);
++		execl(self, self, "--fd-probe", number, NULL);
++		_exit(1);
++	}
++	CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && !WEXITSTATUS(status));
++	return 0;
++}
++
++static int landlock_denial(void)
++{
++	struct landlock_ruleset_attr attr = { .handled_access_fs = LANDLOCK_ACCESS_FS_READ_FILE };
++	int ruleset, clone;
++	char c;
++
++	ruleset = syscall(SYS_landlock_create_ruleset, &attr, sizeof(attr), 0);
++	if (ruleset < 0 && (errno == ENOSYS || errno == EOPNOTSUPP))
++		return KSFT_SKIP;
++	CHECK(ruleset >= 0);
++	CHECK(!scope(inside, READ_SCOPE));
++	CHECK(!confine(1U << READ_SCOPE));
++	CHECK(!syscall(SYS_landlock_restrict_self, ruleset, 0));
++	DENIED(openat(inside, "file", O_RDONLY), EACCES);
++	/* This is derivation from an existing bearer FD, not a pathname open. */
++	clone = capop(datafd, F_CLONEFD_CAP, 1);
++	CHECK(clone >= 0 && capop(clone, F_GETFD_CAP, 0) == 1);
++	CHECK(pread(clone, &c, 1, 0) == 1 && c == 'd');
++	DENIED(pwrite(clone, "x", 1, 0), EBADF);
++	close(clone);
++	close(ruleset);
++	return 0;
++}
++
++static atomic_int start;
++static void *restrict_worker(void *arg)
++{
++	unsigned long mask = (uintptr_t)arg;
++	int i;
++
++	while (!atomic_load(&start))
++		sched_yield();
++	for (i = 0; i < 2000; i++)
++		if (capop(datafd, F_RESTRICTFD_CAP, mask))
++			return (void *)1;
++	return NULL;
++}
++
++static void *clone_worker(void *arg)
++{
++	int i, fd;
++
++	(void)arg;
++	while (!atomic_load(&start))
++		sched_yield();
++	for (i = 0; i < 2000; i++) {
++		fd = capop(datafd, F_CLONEFD_CAP, 3);
++		if (fd < 0)
++			return (void *)1;
++		close(fd);
++	}
++	return NULL;
++}
++
++static int concurrency(void)
++{
++	pthread_t threads[4];
++	void *result;
++	int i, fd;
++	char c;
++
++	CHECK(!pthread_create(&threads[0], NULL, restrict_worker, (void *)1));
++	CHECK(!pthread_create(&threads[1], NULL, restrict_worker, (void *)2));
++	CHECK(!pthread_create(&threads[2], NULL, clone_worker, NULL));
++	CHECK(!pthread_create(&threads[3], NULL, clone_worker, NULL));
++	atomic_store(&start, 1);
++	for (i = 0; i < 4; i++) {
++		CHECK(!pthread_join(threads[i], &result));
++		CHECK(!result);
++	}
++	CHECK(capop(datafd, F_GETFD_CAP, 0) == 0);
++	for (i = 0; i < 2000; i++) {
++		fd = capop(datafd, F_CLONEFD_CAP, 3);
++		CHECK(fd >= 0 && capop(fd, F_GETFD_CAP, 0) == 0);
++		DENIED(pwrite(fd, "!", 1, 0), EBADF);
++		DENIED(pread(fd, &c, 1, 0), EBADF);
++		close(fd);
++	}
++	return 0;
++}
++
++static int dac_grant(void)
++{
++	int fd;
++	char c;
++
++	CHECK(!fchmod(datafd, 0000));
++	CHECK(!fchmodat(rootfd, "in", 0711, 0));
++	CHECK(!scope(inside, READ_SCOPE));
++	CHECK(!confine(1U << READ_SCOPE));
++	CHECK(setfsuid(65534) == 0);
++	CHECK(setfsuid(65534) == 65534);
++	fd = openat(inside, "file", O_RDONLY);
++	CHECK(fd >= 0 && read(fd, &c, 1) == 1 && c == 'd');
++	close(fd);
++	DENIED(openat(inside, "file", O_WRONLY), EACCES);
++	return 0;
++}
++
++static int dac_unhandled(void)
++{
++	CHECK(!fchmod(datafd, 0000));
++	CHECK(!fchmodat(rootfd, "in", 0711, 0));
++	CHECK(!confine(0));
++	CHECK(setfsuid(65534) == 0);
++	DENIED(openat(inside, "file", O_RDONLY), EACCES);
++	DENIED(openat(inside, "file", O_WRONLY), EACCES);
++	return 0;
++}
++
++static int acl_ceiling(void)
++{
++	/* Linux ACL xattr: version 2, USER_OBJ rw, GROUP_OBJ rw, OTHER rw. */
++	const unsigned char acl[] = {
++		2, 0, 0, 0,
++		1, 0, 6, 0, 255, 255, 255, 255,
++		4, 0, 6, 0, 255, 255, 255, 255,
++		32, 0, 6, 0, 255, 255, 255, 255,
++	};
++
++	if (fsetxattr(datafd, "system.posix_acl_access", acl, sizeof(acl), 0)) {
++		if (errno == EOPNOTSUPP)
++			return KSFT_SKIP;
++		CHECK(0);
++	}
++	CHECK(!fchmodat(rootfd, "in", 0711, 0));
++	CHECK(!confine((1U << READ_SCOPE) | (1U << WRITE_SCOPE)));
++	CHECK(setfsuid(65534) == 0);
++	DENIED(openat(inside, "file", O_RDWR), EACCES);
++	return 0;
++}
++
++static int mapping(void)
++{
++	void *p;
++	struct stat st;
++
++	CHECK(!capop(datafd, F_RESTRICTFD_CAP, 1));
++	p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, datafd, 0);
++	CHECK(p == MAP_FAILED && errno == EACCES);
++	p = mmap(NULL, 4096, PROT_READ, MAP_SHARED, datafd, 0);
++	CHECK(p != MAP_FAILED);
++	DENIED(mprotect(p, 4096, PROT_READ | PROT_WRITE), EACCES);
++	CHECK(!munmap(p, 4096));
++	CHECK(!fstat(datafd, &st) && st.st_size == 4);
++	return 0;
++}
++
++static int tmpfile_unhandled(void)
++{
++	int fd;
++
++	CHECK(!confine(0));
++	fd = openat(inside, ".", O_TMPFILE | O_RDWR, 0600);
++	CHECK(fd >= 0 && write(fd, "x", 1) == 1);
++	close(fd);
++	return 0;
++}
++
++static int readonly_mount(void)
++{
++	char root[256], path[300];
++
++	CHECK(!private_mountns(root, sizeof(root)));
++	snprintf(path, sizeof(path), "%s/in", root);
++	CHECK(!mount("tmpfs", path, "tmpfs", 0, "mode=0700"));
++	close(inside);
++	inside = openat(rootfd, "in", O_PATH | O_DIRECTORY);
++	CHECK(inside >= 0);
++	CHECK(!scope(inside, PR_CAPAUTH_FS_CREATE_FILE));
++	CHECK(!scope(inside, WRITE_SCOPE));
++	CHECK(!mount(NULL, path, NULL, MS_REMOUNT | MS_RDONLY, NULL));
++	CHECK(!confine((1U << PR_CAPAUTH_FS_CREATE_FILE) | (1U << WRITE_SCOPE)));
++	DENIED(openat(inside, "new", O_CREAT | O_WRONLY, 0600), EROFS);
++	return 0;
++}
++
++static int reuse_slot;
++static void *close_worker(void *arg)
++{
++	int i;
++
++	(void)arg;
++	while (!atomic_load(&start))
++		sched_yield();
++	for (i = 0; i < 4000; i++) {
++		if (dup2(datafd, reuse_slot) != reuse_slot)
++			return (void *)1;
++		close(reuse_slot);
++	}
++	return NULL;
++}
++
++static int close_race(void)
++{
++	pthread_t thread;
++	void *result;
++	int i, fd;
++
++	CHECK(!capop(datafd, F_RESTRICTFD_CAP, 0));
++	/* Keep clone outputs away from the deliberately recycled slot. */
++	reuse_slot = 200;
++	CHECK(dup2(datafd, reuse_slot) == reuse_slot);
++	CHECK(!pthread_create(&thread, NULL, close_worker, NULL));
++	atomic_store(&start, 1);
++	for (i = 0; i < 4000; i++) {
++		fd = capop(reuse_slot, F_CLONEFD_CAP, 3);
++		if (fd < 0) {
++			CHECK(errno == EBADF);
++			continue;
++		}
++		CHECK(capop(fd, F_GETFD_CAP, 0) == 0);
++		close(fd);
++	}
++	CHECK(!pthread_join(thread, &result) && !result);
++	return 0;
++}
++
++static int symlink_race(void)
++{
++	int outside_data, fd, i, status;
++	char contents[4];
++	pid_t pid;
++
++	outside_data = openat(outside, "file", O_RDONLY);
++	CHECK(outside_data >= 0);
++	CHECK(!symlinkat("file", inside, "race"));
++	CHECK(!symlinkat("../out/file", inside, "gate"));
++	pid = fork();
++	CHECK(pid >= 0);
++	if (!pid) {
++		for (i = 0; i < 5000; i++)
++			if (syscall(SYS_renameat2, inside, "race", inside, "gate", RENAME_EXCHANGE))
++				_exit(1);
++		_exit(0);
++	}
++	CHECK(!scope(inside, WRITE_SCOPE));
++	CHECK(!confine(1U << WRITE_SCOPE));
++	for (i = 0; i < 5000; i++) {
++		fd = openat(inside, "race", O_WRONLY);
++		if (fd < 0) {
++			CHECK(errno == EACCES);
++			continue;
++		}
++		CHECK(pwrite(fd, "!", 1, 0) == 1);
++		close(fd);
++	}
++	CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && !WEXITSTATUS(status));
++	CHECK(pread(outside_data, contents, sizeof(contents), 0) == sizeof(contents));
++	CHECK(!memcmp(contents, "data", sizeof(contents)));
++	close(outside_data);
++	return 0;
++}
++
++static void *transition_worker(void *arg)
++{
++	int fd;
++
++	if (!arg) {
++		while (!atomic_load(&start))
++			sched_yield();
++		return NULL;
++	}
++	if (prctl(PR_CAPAUTH, PR_CAPAUTH_DROP_FS_SCOPE_RIGHT,
++		  (unsigned long)inside, (unsigned long)READ_SCOPE, 0))
++		return (void *)1;
++	fd = openat(inside, "file", O_RDONLY);
++	if (fd != -1 || errno != EACCES) {
++		if (fd >= 0)
++			close(fd);
++		return (void *)1;
++	}
++	return NULL;
++}
++
++static int transitions(void)
++{
++	pthread_t thread;
++	void *result;
++	int fd, ret, attempts;
++
++	CHECK(!scope(inside, READ_SCOPE));
++	CHECK(!pthread_create(&thread, NULL, transition_worker, NULL));
++	DENIED(confine(1U << READ_SCOPE), EBUSY);
++	CHECK(!prctl(PR_CAPAUTH, PR_CAPAUTH_GET_CONFINED, 0, 0, 0));
++	atomic_store(&start, 1);
++	CHECK(!pthread_join(thread, &result) && !result);
++	/* clear_child_tid/join can precede removal from the kernel thread group. */
++	for (attempts = 0; attempts < 10000; attempts++) {
++		ret = confine(1U << READ_SCOPE);
++		if (!ret || errno != EBUSY)
++			break;
++		usleep(1000);
++	}
++	CHECK(!ret);
++	CHECK(!pthread_create(&thread, NULL, transition_worker, (void *)1));
++	CHECK(!pthread_join(thread, &result) && !result);
++	/* Reduction replaces the calling task's immutable credential authority. */
++	fd = openat(inside, "file", O_RDONLY);
++	CHECK(fd >= 0);
++	close(fd);
++	CHECK(!prctl(PR_CAPAUTH, PR_CAPAUTH_DROP_FS_SCOPE_RIGHT,
++		     (unsigned long)inside, (unsigned long)READ_SCOPE, 0));
++	DENIED(openat(inside, "file", O_RDONLY), EACCES);
++	return 0;
++}
++
++static int credential_lifetime(void)
++{
++	int i, status;
++	pid_t pid;
++
++	for (i = 0; i < 128; i++) {
++		pid = fork();
++		CHECK(pid >= 0);
++		if (!pid) {
++			if (scope(inside, READ_SCOPE) || confine(1U << READ_SCOPE) ||
++			    prctl(PR_CAPAUTH, PR_CAPAUTH_DROP_FS_SCOPE,
++				  (unsigned long)inside, 0, 0))
++				_exit(1);
++			_exit(0);
++		}
++		CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && !WEXITSTATUS(status));
++	}
++	CHECK(!prctl(PR_CAPAUTH, PR_CAPAUTH_GET_CONFINED, 0, 0, 0));
++	return 0;
++}
++
++static int failure_atomicity(void)
++{
++	struct stat st;
++
++	DENIED(confine(1U << PR_CAPAUTH_FS_TRAVERSE), EOPNOTSUPP);
++	CHECK(!prctl(PR_CAPAUTH, PR_CAPAUTH_GET_CONFINED, 0, 0, 0));
++	DENIED(capop(datafd, F_RESTRICTFD_CAP, 0x80), EOPNOTSUPP);
++	CHECK(capop(datafd, F_GETFD_CAP, 0) == 3);
++	CHECK(!scope(inside, READ_SCOPE));
++	CHECK(!confine(1U << READ_SCOPE));
++	DENIED(scope(outside, READ_SCOPE), EPERM);
++	CHECK(!prctl(PR_CAPAUTH, PR_CAPAUTH_NORMAL, 0, 0, 0));
++	CHECK(prctl(PR_CAPAUTH, PR_CAPAUTH_GET_CONFINED, 0, 0, 0) == 1);
++	DENIED(openat(outside, "file", O_RDONLY), EACCES);
++	CHECK(!fstatat(outside, "file", &st, 0) && st.st_size == 4);
++	return 0;
++}
++
++static const struct {
++	const char *name;
++	int (*run)(void);
++} cases[] = {
++	{ "legacy syscall matrix", legacy },
++	{ "unhandled syscall matrix", unhandled },
++	{ "handled denied syscall matrix and failure state", denied },
++	{ "handled authorized syscall matrix", allowed },
++	{ "relative absolute symlink BENEATH IN_ROOT", resolution },
++	{ "scope follows object not pathname or reused descriptor", object_binding },
++	{ "bind mount and new mount namespace identity", mount_binding },
++	{ "restrict clone dup reuse no amplification", attenuation },
++	{ "SCM_RIGHTS and fork exec preserve bearer attenuation", bearer },
++	{ "Landlock denial independent of semantic grant", landlock_denial },
++	{ "parallel restriction clone and post-restriction denial", concurrency },
++	{ "unknown requests and irreversible confinement failure atomicity", failure_atomicity },
++	{ "mode-000 semantic READ grant and unhandled WRITE DAC denial", dac_grant },
++	{ "unhandled DAC denial with non-owner FSUID", dac_unhandled },
++	{ "ACL allow cannot exceed handled ceiling", acl_ceiling },
++	{ "managed mmap and mprotect cannot restore WRITE", mapping },
++	{ "unhandled O_TMPFILE retains Linux initial FD behavior", tmpfile_unhandled },
++	{ "read-only mount denies authorized creation", readonly_mount },
++	{ "clone races close and descriptor reuse", close_race },
++	{ "symlink exchange race cannot modify outside object", symlink_race },
++	{ "single-thread entry and task-local monotonic reductions", transitions },
++	{ "fork scope clone reduction destruction lifetime stress", credential_lifetime },
++};
++
++int main(int argc, char **argv)
++{
++	char directory[] = "/tmp/authority-matrix-XXXXXX", c;
++	unsigned int i;
++	int status, fd;
++	pid_t pid;
++
++	if (argc == 3 && !strcmp(argv[1], "--fd-probe")) {
++		fd = atoi(argv[2]);
++		CHECK(prctl(PR_CAPAUTH, PR_CAPAUTH_GET_CONFINED, 0, 0, 0) == 1);
++		CHECK(capop(fd, F_GETFD_CAP, 0) == 1);
++		CHECK(pread(fd, &c, 1, 0) == 1 && c == 'd');
++		DENIED(pwrite(fd, "!", 1, 0), EBADF);
++		return 0;
++	}
++	ksft_print_header();
++	if (geteuid() || prctl(PR_CAPAUTH, PR_CAPAUTH_GET_CONFINED, 0, 0, 0) != 0)
++		ksft_exit_skip("requires root in an unconfined disposable guest\n");
++	CHECK(mkdtemp(directory));
++	self = realpath(argv[0], NULL);
++	CHECK(self);
++	/* All mounts and filesystem changes are private to this process tree. */
++	CHECK(!unshare(CLONE_NEWNS));
++	CHECK(!mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL));
++	ksft_set_plan(ARRAY_SIZE(cases));
++	for (i = 0; i < ARRAY_SIZE(cases); i++) {
++		CHECK(!mount(TEST_FS, directory, TEST_FS, 0, "mode=0700"));
++		rootfd = open(directory, O_PATH | O_DIRECTORY);
++		CHECK(rootfd >= 0);
++		CHECK(!mkdirat(rootfd, "in", 0700) && !mkdirat(rootfd, "out", 0700));
++		inside = openat(rootfd, "in", O_PATH | O_DIRECTORY);
++		outside = openat(rootfd, "out", O_PATH | O_DIRECTORY);
++		CHECK(inside >= 0 && outside >= 0);
++		datafd = openat(inside, "file", O_CREAT | O_RDWR, 0600);
++		CHECK(datafd >= 0 && write(datafd, "data", 4) == 4);
++		fd = openat(outside, "file", O_CREAT | O_RDWR, 0600);
++		CHECK(fd >= 0 && write(fd, "data", 4) == 4);
++		close(fd);
++		fd = openat(inside, "victim", O_CREAT | O_RDWR, 0600);
++		CHECK(fd >= 0);
++		close(fd);
++		pid = fork();
++		CHECK(pid >= 0);
++		if (!pid)
++			_exit(cases[i].run());
++		CHECK(waitpid(pid, &status, 0) == pid);
++		if (WIFEXITED(status) && WEXITSTATUS(status) == KSFT_SKIP)
++			ksft_test_result_skip("%s\n", cases[i].name);
++		else
++			ksft_test_result(WIFEXITED(status) && !WEXITSTATUS(status),
++					 "%s\n", cases[i].name);
++		close(datafd);
++		close(inside);
++		close(outside);
++		close(rootfd);
++		CHECK(!umount2(directory, MNT_DETACH));
++	}
++	CHECK(!rmdir(directory));
++	free((void *)self);
++	ksft_finished();
++}

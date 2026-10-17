@@ -1,0 +1,283 @@
+From 99e2689d33e6f40c29fd14d204e7c6acf136acd5 Mon Sep 17 00:00:00 2001
+From: Eugen <eugen252009@gmail.com>
+Date: Sat, 17 Oct 2026 10:22:51 +0200
+Subject: [PATCH 7/9] selftests: authority: register suites and isolated QEMU
+ runner
+
+Register all now-present suites, record configuration fragments and isolated QEMU packaging/execution instructions. Keep full qualification images/logs/evidence outside Git.
+---
+ tools/testing/selftests/Makefile              |   1 +
+ tools/testing/selftests/authority/Makefile    |   8 ++
+ tools/testing/selftests/authority/README.md   | 120 ++++++++++++++++++
+ .../testing/selftests/authority/debug.config  |   6 +
+ .../selftests/authority/qualification.config  |  19 +++
+ tools/testing/selftests/authority/run-qemu.sh |  67 ++++++++++
+ 6 files changed, 221 insertions(+)
+ create mode 100644 tools/testing/selftests/authority/Makefile
+ create mode 100644 tools/testing/selftests/authority/README.md
+ create mode 100644 tools/testing/selftests/authority/debug.config
+ create mode 100644 tools/testing/selftests/authority/qualification.config
+ create mode 100755 tools/testing/selftests/authority/run-qemu.sh
+
+diff --git a/tools/testing/selftests/Makefile b/tools/testing/selftests/Makefile
+index 273853937c2546add0cbf38d4320712d3d93450e..671c3437cceabe4732f70fdec77cb67c26f12edb 100644
+--- a/tools/testing/selftests/Makefile
++++ b/tools/testing/selftests/Makefile
+@@ -4,6 +4,7 @@ TARGETS += alloc_tag
+ TARGETS += alsa
+ TARGETS += amd-pstate
+ TARGETS += arm64
++TARGETS += authority
+ TARGETS += bpf
+ TARGETS += breakpoints
+ TARGETS += cachestat
+diff --git a/tools/testing/selftests/authority/Makefile b/tools/testing/selftests/authority/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..4bb0273218b6a30610413b264a458410af5bfe5d
+--- /dev/null
++++ b/tools/testing/selftests/authority/Makefile
+@@ -0,0 +1,8 @@
++# SPDX-License-Identifier: GPL-2.0
++CFLAGS += -Wall -O2 $(KHDR_INCLUDES)
++TEST_GEN_PROGS := authority_test qualification_test landlock_fd_test \
++	idmapped_test callback_test establishment_test dac_fd_test handle_test temporal_test
++LDLIBS += -pthread
++TEST_FILES := run-qemu.sh qualification.config debug.config
++
++include ../lib.mk
+diff --git a/tools/testing/selftests/authority/README.md b/tools/testing/selftests/authority/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..04d0f4f8496bad3aee83e825bcb89fab93a28afb
+--- /dev/null
++++ b/tools/testing/selftests/authority/README.md
+@@ -0,0 +1,120 @@
++# Filesystem Authority qualification tests
++
++Run only inside a disposable VM. `qualification_test` creates private mount
++namespaces and mounts; construction of scopes requires CAP_SYS_ADMIN. The
++original `authority_test` contains 13 cases; `qualification_test` contains 22
++**grouped** cases with syscall and stress assertions, not 22 individual syscalls.
++`landlock_fd_test` adds seven differential FD/LSM groups. A skipped ACL or LSM
++precondition is not a pass. All binaries return kselftest status. The targeted
++Landlock audit corrected the old retroactive READ-clone denial expectation and
++added a real cached-TRUNCATE amplification regression. See the qualification
++ledger and Documentation/authority/landlock-audit.md.
++Do not infer general process confinement from these tests.
++
++Additional qualification groups:
++
++* `temporal_test`: fifteen executed temporal FD/context/async/LSM/concurrency
++  groups plus one explicit SKIP for the absent global-revocation API. Distinguishes
++  independent clone ownership, mutable FD aliases, COW task credentials and
++  ring-bound personality snapshots. Native controls also run on pristine Linux.
++  Registration after source reduction must capture the reduced state; an earlier
++  legitimate context may remain valid. Dedicated enforcing LSM fixture sources,
++  policies and exact commands are retained in the temporal-authority report.
++  See Documentation/authority/temporal-semantics.md; stored identity alone does
++  not constitute a delegated Authority capability.
++
++* `idmapped_test`: nine groups covering tmpfs idmap identity/DAC/ACLs, native
++  and UNHANDLED behavior, mount-bound scope ceilings, clone/dup attenuation,
++  create ownership, NOREPLACE/EXCHANGE rename, LINK, unlink, truncate, lifetime,
++  and inability of nested-userns root to manufacture initial-userns scopes.
++* `callback_test`: four native/handled overlayfs groups. Explicit scopes do
++  not override filesystem permission callbacks; unsupported overlay FD-cap
++  operations remain EOPNOTSUPP. This is not general callback-FS qualification.
++* `establishment_test`: eleven grouped pidfd/procfs/O_PATH, fanotify,
++  ordinary io_uring/fixed-file, memfd and SysV boundary checks.
++* `dac_fd_test`: eleven DAC/FSUID/FSGID/group/provider and managed transfer,
++  mmap/mprotect/fallocate/metadata attenuation groups.
++* `handle_test`: twelve generic/XFS handle acquisition groups, including four
++  native controls. Requires a **dedicated disposable** XFS mount at `/mnt/xfs`;
++  otherwise skips before assertions. It creates a unique temporary subdirectory.
++  It does not format disks; guest orchestration must provide the fixture.
++
++Use CONFIG_USER_NS=y, TMPFS_POSIX_ACL=y, OVERLAY_FS=y, FANOTIFY=y and
++FANOTIFY_ACCESS_PERMISSIONS=y for the relevant groups. Namespace/privilege
++prerequisite skips are not passes. Exact evaluated configurations and orchestration
++are recorded in Documentation/authority/qualification-status.md and the final
++closure evidence, including selected major-LSM policies. These new groups are
++invariant-oriented replacements, not recovered copies or numerical equivalents
++of the historical 21/47 harnesses. Registered io_uring credential personalities
++are distinct from ordinary submission or fixed-file imports; the retained
++credential-token observation is not counted as a security PASS.
++
++## External build
++
++Use a clean source snapshot containing **all** intended tracked and untracked
++prototype files. Never run mrproper in the working tree to obtain this snapshot.
++For example, from the tree root, with a NEW `/tmp/authority-repro` directory:
++
++```sh
++E=/tmp/authority-repro
++mkdir -p "$E/src" "$E/build" "$E/tests"
++git ls-files -co --exclude-standard -z | sort -zu |
++  tar --null -T - -cf "$E/source.tar"
++tar -xf "$E/source.tar" -C "$E/src"
++cd "$E/src"
++make O="$E/build" x86_64_defconfig
++scripts/kconfig/merge_config.sh -m -O "$E/build" "$E/build/.config" \
++  tools/testing/selftests/authority/qualification.config
++make O="$E/build" olddefconfig
++make O="$E/build" -j12 bzImage
++make O="$E/build" headers_install INSTALL_HDR_PATH="$E/headers"
++make -C tools/testing/selftests/authority OUTPUT="$E/tests/" \
++  CFLAGS="-static -Wall -O2 -isystem $E/headers/include"
++bash tools/testing/selftests/authority/run-qemu.sh \
++  "$E/build/arch/x86/boot/bzImage" /path/to/busybox-static "$E/run" \
++  "$E/tests/authority_test" "$E/tests/qualification_test" "$E/tests/landlock_fd_test"
++```
++
++Required build tools: GCC, binutils, make, flex, bison, bc, libelf/libssl headers,
++rsync, Python, Perl; guest packaging: cpio/gzip and static BusyBox; runtime:
++QEMU x86_64 and /dev/kvm. Container builds must mount only the staging snapshot
++and evidence, not the worktree. Neither the runner nor the build installs a
++kernel. QEMU has no network interface or host filesystem/block-device export.
++Runner evidence directories must not already exist. `QEMU_TIMEOUT` defaults to
++600 seconds. The console loglevel suppresses informational printk interleaving;
++the guest dumps the full kernel log after suites. Kernel poweroff alone does
++not count as a pass: suite exit markers and kernel diagnostics are checked.
++Review full logs and TAP totals as well. Initramfs ownership and timestamps
++are normalized (SOURCE_DATE_EPOCH, default zero); the kernel build itself is
++not claimed bit-identical without matching build metadata and toolchain.
++
++`QEMU_ASSETS=/directory` copies required companion binaries into each guest
++suite's working directory. For upstream Landlock `base_test` / `fs_test`, build
++its directory with static CFLAGS and include `true`, `sandbox-and-launch`,
++`wait-pipe`, and `wait-pipe-sandbox` as assets. Fresh writable per-suite working
++directories are necessary; running fs_test from `/` collides with `/tmp`.
++
++For KASAN/lockdep merge `debug.config` into a **separate** build. For KCSAN use a
++separate configuration with KASAN disabled and KCSAN/KCSAN_STRICT enabled; check
++that olddefconfig retained the options. For 32-bit compatibility build the same
++userspace sources with `-m32` and multilib libc, then run on the IA32-enabled
++x86_64 guest. This is not a native 32-bit kernel qualification.
++
++To exercise ramfs, compile a second qualification binary with
++`-DTEST_FS='"ramfs"'`; the ACL case must skip if the filesystem lacks POSIX ACLs.
++The read-only subfixture intentionally remains tmpfs. Save source/config,
++compiler versions, all build/run commands, logs and SHA-256 manifests. Fragment
++files describe required features, not bit-identical kernels; use the retained
++full `.config` for an exact configuration reproduction.
++
++There is currently **no Authority enable/disable Kconfig switch**. KUNIT=n only
++disables synthetic tests, not enforcement. Do not describe it as Authority-off.
++Build landlock_fd_test with `-DENABLE_AUTHORITY=0` to leave the task's Authority
++domain unhandled; this does NOT compile out the Authority FD API. The test
++queries Landlock availability and records unsupported subcases as skips. The
++post-open fixture deliberately grants READ of its own executable so execve
++inheritance tests do not fail on the test binary's acquisition itself.
++
++The old temporary 21-case capability and 47-case DAC harnesses are not restored
++by this suite. See Documentation/authority/qualification-status.md and
++filesystem-v1-matrix.md for the release-gate decision and remaining blockers.
+diff --git a/tools/testing/selftests/authority/debug.config b/tools/testing/selftests/authority/debug.config
+new file mode 100644
+index 0000000000000000000000000000000000000000..10d16799c6b35f27ecdcac343b55e416d4aaf97f
+--- /dev/null
++++ b/tools/testing/selftests/authority/debug.config
+@@ -0,0 +1,6 @@
++CONFIG_KASAN=y
++CONFIG_KASAN_GENERIC=y
++CONFIG_KASAN_INLINE=y
++CONFIG_PROVE_LOCKING=y
++CONFIG_DEBUG_ATOMIC_SLEEP=y
++CONFIG_DEBUG_LIST=y
+diff --git a/tools/testing/selftests/authority/qualification.config b/tools/testing/selftests/authority/qualification.config
+new file mode 100644
+index 0000000000000000000000000000000000000000..966eab5f5d75a9382592d9634759c8728f197709
+--- /dev/null
++++ b/tools/testing/selftests/authority/qualification.config
+@@ -0,0 +1,19 @@
++# Merge with x86_64_defconfig using scripts/kconfig/merge_config.sh.
++CONFIG_KUNIT=y
++CONFIG_SECURITY=y
++CONFIG_SECURITY_PATH=y
++CONFIG_SECURITY_LANDLOCK=y
++CONFIG_TMPFS=y
++CONFIG_TMPFS_POSIX_ACL=y
++CONFIG_TMPFS_XATTR=y
++CONFIG_OVERLAY_FS=y
++CONFIG_FANOTIFY=y
++CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y
++CONFIG_XFS_FS=y
++CONFIG_NAMESPACES=y
++CONFIG_USER_NS=y
++CONFIG_DEVTMPFS=y
++CONFIG_DEVTMPFS_MOUNT=y
++CONFIG_BLK_DEV_INITRD=y
++CONFIG_SERIAL_8250_CONSOLE=y
++CONFIG_IA32_EMULATION=y
+diff --git a/tools/testing/selftests/authority/run-qemu.sh b/tools/testing/selftests/authority/run-qemu.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..062b58485aed5aaf60208badefea76a48a6609ac
+--- /dev/null
++++ b/tools/testing/selftests/authority/run-qemu.sh
+@@ -0,0 +1,67 @@
++#!/bin/bash
++# SPDX-License-Identifier: GPL-2.0
++# Only boots an isolated guest. Requires statically linked test executables.
++set -euo pipefail
++if [ "$#" -lt 4 ]; then
++	echo "usage: $0 bzImage busybox-static NEW-EVIDENCE-DIRECTORY test-executable..." >&2
++	exit 2
++fi
++kernel=$(realpath "$1")
++busybox=$(realpath "$2")
++out=$(realpath -m "$3")
++shift 3
++# Never overwrite evidence or use the host filesystem as a guest disk.
++mkdir "$out"
++mkdir -p "$out/root"/{bin,dev,proc,sys,tmp,tests}
++cp "$busybox" "$out/root/bin/busybox"
++ln -s busybox "$out/root/bin/sh"
++cp "$kernel" "$out/bzImage"
++if [ -n "${QEMU_ASSETS:-}" ]; then
++	cp -a "$QEMU_ASSETS/." "$out/root/tests/"
++fi
++cat > "$out/root/init" <<'INIT'
++#!/bin/sh
++set -eu
++/bin/busybox mount -t devtmpfs devtmpfs /dev
++/bin/busybox mount -t proc proc /proc
++/bin/busybox mount -t sysfs sysfs /sys
++/bin/busybox mount -t tmpfs tmpfs /tmp
++INIT
++for test in "$@"; do
++	name=$(basename "$test")
++	[[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || exit 2
++	test ! -e "$out/root/tests/$name"
++	cp "$test" "$out/root/tests/$name"
++	cat >> "$out/root/init" <<INIT
++/bin/busybox mkdir /tmp/run-$name
++cd /tmp/run-$name
++/bin/busybox cp -a /tests/. .
++/bin/busybox chown 0:0 .
++rc=0
++./$name || rc=\$?
++echo "SUITE $name EXIT=\$rc"
++cd /
++INIT
++done
++printf 'echo KERNEL_LOG_BEGIN\n/bin/busybox dmesg\necho KERNEL_LOG_END\n' >> "$out/root/init"
++printf 'echo AUTHORITY_GUEST_DONE\n/bin/busybox poweroff -f\n' >> "$out/root/init"
++chmod +x "$out/root/init"
++find "$out/root" -exec touch -h -d "@${SOURCE_DATE_EPOCH:-0}" {} +
++(cd "$out/root"; find . -print0 | LC_ALL=C sort -z |
++	cpio --null -o -H newc --reproducible --owner=0:0) \
++	2> "$out/cpio.log" | gzip -n > "$out/initramfs.gz"
++command=(qemu-system-x86_64 -machine q35,accel=kvm -cpu host -m 4096 -smp 4
++	-kernel "$out/bzImage" -initrd "$out/initramfs.gz"
++	-append 'console=ttyS0 rdinit=/init panic=-1 loglevel=4' -nic none -display none
++	-serial "file:$out/serial.log" -monitor none -no-reboot)
++printf '%q ' "${command[@]}" > "$out/command.txt"
++printf '\n' >> "$out/command.txt"
++timeout "${QEMU_TIMEOUT:-600}" "${command[@]}"
++(cd "$out"; sha256sum bzImage initramfs.gz root/tests/* > SHA256SUMS)
++grep -q AUTHORITY_GUEST_DONE "$out/serial.log"
++# A missing/interleaved exit marker is an evidence failure, never a pass.
++[ "$(tr -d '\r' < "$out/serial.log" | grep -Ec '^SUITE .* EXIT=[04]$')" -eq "$#" ]
++# A powered-off QEMU is not evidence that its tests passed.
++errors='SUITE .* EXIT=([^04]|[04][0-9])|BUG:|WARNING:|KASAN:|KCSAN:'
++errors+='|possible circular locking|not ok'
++! grep -Eq "$errors" "$out/serial.log"

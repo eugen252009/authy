@@ -1,0 +1,805 @@
+From 4099754d22849c1db34438b66c0296ed57581d0f Mon Sep 17 00:00:00 2001
+From: Eugen <eugen252009@gmail.com>
+Date: Sat, 17 Oct 2026 10:22:16 +0200
+Subject: [PATCH 2/9] fs: add attenuating and independently cloned file
+ capabilities
+
+Add regular-file bitmap query/restriction/clone operations and shared-description lifetime/use checks. Keep source-context and cached-LSM preservation hooks and enforcing implementations together with the clone operation so the series does not advertise an unguarded derivation. Include the adjacent vfs_link_path declaration from the same existing fs.h change; its implementation follows next.
+---
+ fs/Makefile                      |   2 +-
+ fs/fcntl.c                       |   9 +
+ fs/file_capability.c             | 344 +++++++++++++++++++++++++++++++
+ fs/file_table.c                  |   3 +
+ fs/ioctl.c                       |   7 +
+ fs/read_write.c                  |   6 +
+ include/linux/file_capability.h  |  22 ++
+ include/linux/fs.h               |   5 +
+ include/linux/lsm_hook_defs.h    |   1 +
+ include/linux/security.h         |   6 +
+ include/uapi/linux/fcntl.h       |  18 ++
+ mm/mmap.c                        |  15 +-
+ security/apparmor/include/file.h |   2 +-
+ security/apparmor/lsm.c          |  28 +++
+ security/landlock/fs.c           |  16 ++
+ security/security.c              |  17 ++
+ security/selinux/hooks.c         |   3 +
+ 17 files changed, 501 insertions(+), 3 deletions(-)
+ create mode 100644 fs/file_capability.c
+ create mode 100644 include/linux/file_capability.h
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 055dfc23d82b6f074a888d2c931f04d12da420ce..1f4aadd47e3f6eb6d48b2823d6db2440993caa2f 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -7,7 +7,7 @@
+ # 
+ 
+ 
+-obj-y :=	open.o read_write.o file_table.o super.o \
++obj-y :=	open.o read_write.o file_table.o file_capability.o super.o \
+ 		char_dev.o stat.o exec.o pipe.o namei.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o inode.o \
+ 		attr.o bad_inode.o file.o filesystems.o namespace.o \
+diff --git a/fs/fcntl.c b/fs/fcntl.c
+index c158f082f1da4fd4cc6f88dcf58a8e84f9076943..5245ddcf2a887472aba08a408e4648b2a2b9260d 100644
+--- a/fs/fcntl.c
++++ b/fs/fcntl.c
+@@ -12,6 +12,7 @@
+ #include <linux/fs.h>
+ #include <linux/filelock.h>
+ #include <linux/file.h>
++#include <linux/file_capability.h>
+ #include <linux/capability.h>
+ #include <linux/dnotify.h>
+ #include <linux/slab.h>
+@@ -476,6 +477,11 @@ static long do_fcntl(int fd, unsigned int cmd, unsigned long arg,
+ 	case F_SETFL:
+ 		err = setfl(fd, filp, argi);
+ 		break;
++	case F_GETFD_CAP:
++	case F_RESTRICTFD_CAP:
++	case F_CLONEFD_CAP:
++		err = file_cap_fcntl(fd, filp, cmd, arg);
++		break;
+ #if BITS_PER_LONG != 32
+ 	/* 32-bit arches must use fcntl64() */
+ 	case F_OFD_GETLK:
+@@ -579,6 +585,9 @@ static int check_fcntl_cmd(unsigned cmd)
+ 	case F_GETFD:
+ 	case F_SETFD:
+ 	case F_GETFL:
++	case F_GETFD_CAP:
++	case F_RESTRICTFD_CAP:
++	case F_CLONEFD_CAP:
+ 		return 1;
+ 	}
+ 	return 0;
+diff --git a/fs/file_capability.c b/fs/file_capability.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..30ff5fff34330b36cd47bebc358d1701f75dd3bb
+--- /dev/null
++++ b/fs/file_capability.c
+@@ -0,0 +1,344 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Monotonic regular-file capability derivation for the authority PoC. */
++#include <linux/atomic.h>
++#include <linux/bitops.h>
++#include <linux/compat.h>
++#include <linux/file.h>
++#include <linux/file_capability.h>
++#include <linux/fcntl.h>
++#include <linux/fs.h>
++#include <linux/mutex.h>
++#include <linux/security.h>
++#include <linux/slab.h>
++#include <linux/uaccess.h>
++
++struct file_capability {
++	u32 nbits;
++	atomic_long_t rights[];
++};
++
++static unsigned long file_mode_rights(const struct file *file)
++{
++	unsigned long rights = 0;
++
++	if (file->f_mode & FMODE_READ)
++		rights |= BIT(FILE_CAP_READ);
++	if (file->f_mode & FMODE_WRITE)
++		rights |= BIT(FILE_CAP_WRITE);
++	return rights;
++}
++
++bool file_cap_supported(const struct file *file)
++{
++	const char *name;
++
++	if (!file || !file->f_inode || !S_ISREG(file->f_inode->i_mode) ||
++	    IS_ANON_FILE(file->f_inode) ||
++	    (file->f_mode & (FMODE_PATH | FMODE_BACKING)))
++		return false;
++
++	name = file->f_inode->i_sb->s_type->name;
++	/* These generic filesystems have audited, re-entrant regular-file opens. */
++	return !strcmp(name, "rootfs") || !strcmp(name, "ramfs") ||
++	       !strcmp(name, "tmpfs");
++}
++
++bool file_cap_managed(const struct file *file)
++{
++	return file && READ_ONCE(file->f_capability) != NULL;
++}
++
++unsigned long file_cap_rights(const struct file *file)
++{
++	struct file_capability *cap;
++
++	cap = READ_ONCE(file->f_capability);
++	if (!cap)
++		return file_mode_rights(file);
++	return (unsigned long)atomic_long_read(&cap->rights[0]) &
++		GENMASK(FILE_CAP_NR_RIGHTS - 1, 0);
++}
++
++bool file_cap_has(const struct file *file, unsigned int right)
++{
++	if (right >= FILE_CAP_NR_RIGHTS)
++		return false;
++	return file_cap_rights(file) & BIT(right);
++}
++
++static struct file_capability *file_cap_alloc(unsigned long rights)
++{
++	struct file_capability *cap;
++
++	cap = kzalloc(struct_size(cap, rights, 1), GFP_KERNEL);
++	if (!cap)
++		return NULL;
++	cap->nbits = FILE_CAP_NR_RIGHTS;
++	atomic_long_set(&cap->rights[0],
++			rights & GENMASK(FILE_CAP_NR_RIGHTS - 1, 0));
++	return cap;
++}
++
++int file_cap_restrict(struct file *file, unsigned long mask)
++{
++	struct file_capability *cap, *new;
++	unsigned long current_rights, reduced;
++
++	if (!file_cap_supported(file))
++		return -EOPNOTSUPP;
++	mask &= GENMASK(FILE_CAP_NR_RIGHTS - 1, 0);
++	current_rights = file_cap_rights(file);
++	reduced = current_rights & mask;
++	if (reduced == current_rights)
++		return 0;
++
++	cap = READ_ONCE(file->f_capability);
++	if (cap) {
++		atomic_long_fetch_and(mask, &cap->rights[0]);
++		return 0;
++	}
++
++	new = file_cap_alloc(reduced);
++	if (!new)
++		return -ENOMEM;
++	cap = cmpxchg(&file->f_capability, NULL, new);
++	if (cap) {
++		kfree(new);
++		atomic_long_fetch_and(mask, &cap->rights[0]);
++	}
++	return 0;
++}
++
++void file_cap_free(struct file *file)
++{
++	kfree(file->f_capability);
++	file->f_capability = NULL;
++}
++
++static int validate_bitmap(const u8 *bitmap, size_t bytes)
++{
++	size_t i;
++
++	if (bitmap[0] & ~GENMASK(FILE_CAP_NR_RIGHTS - 1, 0))
++		return -EOPNOTSUPP;
++	for (i = 1; i < bytes; i++)
++		if (bitmap[i])
++			return -EOPNOTSUPP;
++	return 0;
++}
++
++static int read_request(unsigned long arg, struct fd_cap_request *header,
++			 u8 **bitmap, size_t *bitmap_size)
++{
++	struct fd_cap_request __user *request = (void __user *)arg;
++
++	if (copy_from_user(header, request, sizeof(*header)))
++		return -EFAULT;
++	if (header->version != FD_CAP_VERSION_1 ||
++	    header->size < sizeof(*header) + 1)
++		return -EINVAL;
++	if (header->size > PAGE_SIZE)
++		return -E2BIG;
++	*bitmap_size = header->size - sizeof(*header);
++	*bitmap = memdup_user(request->rights, *bitmap_size);
++	if (IS_ERR(*bitmap)) {
++		int error = PTR_ERR(*bitmap);
++
++		*bitmap = NULL;
++		return error;
++	}
++	if (validate_bitmap(*bitmap, *bitmap_size)) {
++		kfree(*bitmap);
++		*bitmap = NULL;
++		return -EOPNOTSUPP;
++	}
++	return 0;
++}
++
++static long get_file_cap(unsigned long arg, struct file *file)
++{
++	struct fd_cap_request header;
++	struct fd_cap_request __user *request = (void __user *)arg;
++	u8 *bitmap;
++	size_t bytes;
++	unsigned long rights;
++	int error;
++
++	if (!file_cap_supported(file))
++		return -EOPNOTSUPP;
++	if (copy_from_user(&header, request, sizeof(header)))
++		return -EFAULT;
++	if (header.version != FD_CAP_VERSION_1 || header.flags ||
++	    header.size < sizeof(header) + 1)
++		return -EINVAL;
++	if (header.size > PAGE_SIZE)
++		return -E2BIG;
++	bytes = header.size - sizeof(header);
++	bitmap = kzalloc(bytes, GFP_KERNEL);
++	if (!bitmap)
++		return -ENOMEM;
++	rights = file_cap_rights(file);
++	if (rights & BIT(FILE_CAP_READ))
++		bitmap[FD_CAP_READ / 8] |= BIT(FD_CAP_READ % 8);
++	if (rights & BIT(FILE_CAP_WRITE))
++		bitmap[FD_CAP_WRITE / 8] |= BIT(FD_CAP_WRITE % 8);
++	error = copy_to_user(request->rights, bitmap, bytes) ? -EFAULT : 0;
++	if (!error)
++		error = copy_to_user(request, &header, sizeof(header)) ?
++			-EFAULT : 0;
++	kfree(bitmap);
++	return error;
++}
++
++static int clone_open_flags(const struct file *source, unsigned int source_flags,
++			    unsigned long rights)
++{
++	unsigned int flags;
++
++	/* Preserve source behavior flags; never reproduce open-time actions. */
++	flags = source_flags & ~(O_ACCMODE | O_CLOEXEC | O_CREAT | O_EXCL |
++				    O_TRUNC | O_NOCTTY | O_PATH | O_DIRECTORY |
++				    O_TMPFILE | __O_TMPFILE | __O_REGULAR);
++	if (rights & BIT(FILE_CAP_READ)) {
++		if (rights & BIT(FILE_CAP_WRITE))
++			flags |= O_RDWR;
++		else
++			flags |= O_RDONLY;
++	} else if (rights & BIT(FILE_CAP_WRITE)) {
++		flags |= O_WRONLY;
++	} else if (file_mode_rights(source) & BIT(FILE_CAP_WRITE)) {
++		/* Keep a zero-right clone no more open than its write-only source. */
++		flags |= O_WRONLY;
++	} else {
++		flags |= O_RDONLY;
++	}
++	return flags;
++}
++
++static long clone_file_cap(unsigned int source_fd, unsigned long arg,
++			   struct file *source)
++{
++	struct fd_cap_request header;
++	struct file *clone;
++	struct file_capability *cap;
++	u8 *bitmap;
++	size_t bytes;
++	unsigned long requested = 0, child_rights;
++	unsigned int open_flags, source_flags, fd_flags = 0;
++	int error, fd, post_mask = 0;
++
++	if (!file_cap_supported(source))
++		return -EOPNOTSUPP;
++	spin_lock(&source->f_lock);
++	source_flags = source->f_flags;
++	spin_unlock(&source->f_lock);
++	if ((source_flags & FASYNC) || file_f_owner(source))
++		return -EOPNOTSUPP;
++	error = read_request(arg, &header, &bitmap, &bytes);
++	if (error)
++		return error;
++	if (header.flags & ~FD_CAP_F_CLOEXEC) {
++		error = -EINVAL;
++		goto out_bitmap;
++	}
++	if (header.flags & FD_CAP_F_CLOEXEC)
++		fd_flags = O_CLOEXEC;
++	if (bitmap[FD_CAP_READ / 8] & BIT(FD_CAP_READ % 8))
++		requested |= BIT(FILE_CAP_READ);
++	if (bitmap[FD_CAP_WRITE / 8] & BIT(FD_CAP_WRITE % 8))
++		requested |= BIT(FILE_CAP_WRITE);
++	child_rights = file_cap_rights(source) & requested;
++	open_flags = clone_open_flags(source, source_flags, child_rights);
++
++	/* Preserve the LSM inode-open decision without repeating generic DAC. */
++	post_mask = MAY_OPEN;
++	if (child_rights & BIT(FILE_CAP_READ))
++		post_mask |= MAY_READ;
++	if (child_rights & BIT(FILE_CAP_WRITE))
++		post_mask |= MAY_WRITE;
++	error = security_inode_permission(source->f_inode, post_mask);
++	if (error)
++		goto out_bitmap;
++
++	/* Reinstantiate from the pinned path, never by pathname or procfs. */
++	clone = dentry_open(&source->f_path, open_flags, source->f_cred);
++	if (IS_ERR(clone)) {
++		error = PTR_ERR(clone);
++		goto out_bitmap;
++	}
++	if (clone->f_mode & FMODE_READ)
++		post_mask |= MAY_READ;
++	if (clone->f_mode & FMODE_WRITE)
++		post_mask |= MAY_WRITE;
++	error = security_file_post_open(clone, post_mask);
++	if (error)
++		goto out_clone;
++	error = security_file_clone(source, clone);
++	if (error)
++		goto out_clone;
++
++	/* A fresh file description gets its own offset and filesystem state. */
++	mutex_lock(&source->f_pos_lock);
++	clone->f_pos = source->f_pos;
++	mutex_unlock(&source->f_pos_lock);
++	child_rights &= file_mode_rights(clone);
++	cap = file_cap_alloc(child_rights);
++	if (!cap) {
++		error = -ENOMEM;
++		goto out_clone;
++	}
++	WRITE_ONCE(clone->f_capability, cap);
++
++	fd = get_unused_fd_flags(fd_flags);
++	if (fd < 0) {
++		error = fd;
++		goto out_clone;
++	}
++	fd_install(fd, clone);
++	error = fd;
++	goto out_bitmap;
++
++out_clone:
++	fput(clone);
++out_bitmap:
++	kfree(bitmap);
++	return error;
++}
++
++long file_cap_fcntl(unsigned int fd, struct file *file,
++		    unsigned int cmd, unsigned long arg)
++{
++	struct fd_cap_request header;
++	u8 *bitmap;
++	size_t bytes;
++	unsigned long mask = 0;
++	int error;
++
++	switch (cmd) {
++	case F_GETFD_CAP:
++		return get_file_cap(arg, file);
++	case F_RESTRICTFD_CAP:
++		if (!file_cap_supported(file))
++			return -EOPNOTSUPP;
++		error = read_request(arg, &header, &bitmap, &bytes);
++		if (error)
++			return error;
++		if (header.flags) {
++			error = -EINVAL;
++			goto out;
++		}
++		if (bitmap[FD_CAP_READ / 8] & BIT(FD_CAP_READ % 8))
++			mask |= BIT(FILE_CAP_READ);
++		if (bitmap[FD_CAP_WRITE / 8] & BIT(FD_CAP_WRITE % 8))
++			mask |= BIT(FILE_CAP_WRITE);
++		error = file_cap_restrict(file, mask);
++		goto out;
++	case F_CLONEFD_CAP:
++		return clone_file_cap(fd, arg, file);
++	default:
++		return -EINVAL;
++	}
++out:
++	kfree(bitmap);
++	return error;
++}
+diff --git a/fs/file_table.c b/fs/file_table.c
+index c68b8c0a4097ae9dcf6d0320fef39c80f1517bcc..c3c80f5c6a9419c1249bdb8275f5b06a665b6488 100644
+--- a/fs/file_table.c
++++ b/fs/file_table.c
+@@ -9,6 +9,7 @@
+ #include <linux/string.h>
+ #include <linux/slab.h>
+ #include <linux/file.h>
++#include <linux/file_capability.h>
+ #include <linux/init.h>
+ #include <linux/module.h>
+ #include <linux/fs.h>
+@@ -94,6 +95,7 @@ static inline void backing_file_free(struct backing_file *ff)
+ 
+ static inline void file_free(struct file *f)
+ {
++	file_cap_free(f);
+ 	security_file_free(f);
+ 	if (likely(!(f->f_mode & FMODE_NOACCOUNT)))
+ 		percpu_counter_dec(&nr_files);
+@@ -208,6 +210,7 @@ static int init_file(struct file *f, int flags, const struct cred *cred)
+ 	file_set_fsnotify_mode(f, FMODE_NONOTIFY_PERM);
+ 
+ 	f->f_op		= NULL;
++	f->f_capability = NULL;
+ 	f->f_mapping	= NULL;
+ 	f->private_data = NULL;
+ 	f->f_inode	= NULL;
+diff --git a/fs/ioctl.c b/fs/ioctl.c
+index 1c152c2b1b67deb7c156ce513dea072aaa0ebdea..19545b26d6d2db636ad75ded9bafe072c0d90d98 100644
+--- a/fs/ioctl.c
++++ b/fs/ioctl.c
+@@ -10,6 +10,7 @@
+ #include <linux/capability.h>
+ #include <linux/compat.h>
+ #include <linux/file.h>
++#include <linux/file_capability.h>
+ #include <linux/fs.h>
+ #include <linux/security.h>
+ #include <linux/export.h>
+@@ -591,6 +592,9 @@ SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd, unsigned long, arg)
+ 	error = security_file_ioctl(fd_file(f), cmd, arg);
+ 	if (error)
+ 		return error;
++	/* Generic ioctl commands have no reliable READ/WRITE classification. */
++	if (file_cap_managed(fd_file(f)))
++		return -EOPNOTSUPP;
+ 
+ 	error = do_vfs_ioctl(fd_file(f), fd, cmd, arg);
+ 	if (error == -ENOIOCTLCMD)
+@@ -647,6 +651,9 @@ COMPAT_SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd,
+ 	error = security_file_ioctl_compat(fd_file(f), cmd, arg);
+ 	if (error)
+ 		return error;
++	/* Generic ioctl commands have no reliable READ/WRITE classification. */
++	if (file_cap_managed(fd_file(f)))
++		return -EOPNOTSUPP;
+ 
+ 	switch (cmd) {
+ 	/* FICLONE takes an int argument, so don't use compat_ptr() */
+diff --git a/fs/read_write.c b/fs/read_write.c
+index e8c14e2760b20331ce0aeff15e24cefa2d7df886..22cd403d1e1a6077178f3454751a0f460ef80851 100644
+--- a/fs/read_write.c
++++ b/fs/read_write.c
+@@ -10,6 +10,7 @@
+ #include <linux/sched/xacct.h>
+ #include <linux/fcntl.h>
+ #include <linux/file.h>
++#include <linux/file_capability.h>
+ #include <linux/uio.h>
+ #include <linux/fsnotify.h>
+ #include <linux/security.h>
+@@ -476,6 +477,11 @@ int rw_verify_area(int read_write, struct file *file, const loff_t *ppos, size_t
+ 	if (ret)
+ 		return ret;
+ 
++	if (file_cap_managed(file) &&
++	    !file_cap_has(file, read_write == READ ? FILE_CAP_READ :
++						       FILE_CAP_WRITE))
++		return -EBADF;
++
+ 	return fsnotify_file_area_perm(file, mask, ppos, count);
+ }
+ EXPORT_SYMBOL(rw_verify_area);
+diff --git a/include/linux/file_capability.h b/include/linux/file_capability.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..bafacfbf69753285ebaade4ae7786aeb92e1f82e
+--- /dev/null
++++ b/include/linux/file_capability.h
+@@ -0,0 +1,22 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _LINUX_FILE_CAPABILITY_H
++#define _LINUX_FILE_CAPABILITY_H
++
++#include <linux/types.h>
++
++struct file;
++
++#define FILE_CAP_READ	0
++#define FILE_CAP_WRITE	1
++#define FILE_CAP_NR_RIGHTS 2
++
++bool file_cap_supported(const struct file *file);
++bool file_cap_managed(const struct file *file);
++bool file_cap_has(const struct file *file, unsigned int right);
++unsigned long file_cap_rights(const struct file *file);
++int file_cap_restrict(struct file *file, unsigned long mask);
++long file_cap_fcntl(unsigned int fd, struct file *file,
++		    unsigned int cmd, unsigned long arg);
++void file_cap_free(struct file *file);
++
++#endif /* _LINUX_FILE_CAPABILITY_H */
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index f9d1e05e8ae68ea61561acb4a9ed556150708bb6..6518be4c2c5367d43bf97aea73f2041b09f5ed93 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -1252,8 +1252,11 @@ static inline int ra_has_index(struct file_ra_state *ra, pgoff_t index)
+  * @f_freeptr: Pointer used by SLAB_TYPESAFE_BY_RCU file cache (don't touch.)
+  * @f_ref: reference count
+  */
++struct file_capability;
++
+ struct file {
+ 	spinlock_t			f_lock;
++	struct file_capability		*f_capability;
+ 	fmode_t				f_mode;
+ 	const struct file_operations	*f_op;
+ 	struct address_space		*f_mapping;
+@@ -1771,6 +1774,8 @@ int vfs_symlink(struct mnt_idmap *, struct inode *,
+ 		struct dentry *, const char *, struct delegated_inode *);
+ int vfs_link(struct dentry *, struct mnt_idmap *, struct inode *,
+ 	     struct dentry *, struct delegated_inode *);
++int vfs_link_path(struct dentry *, const struct path *, struct dentry *,
++		  struct delegated_inode *);
+ int vfs_rmdir(struct mnt_idmap *, struct inode *, struct dentry *,
+ 	      struct delegated_inode *);
+ int vfs_unlink(struct mnt_idmap *, struct inode *, struct dentry *,
+diff --git a/include/linux/lsm_hook_defs.h b/include/linux/lsm_hook_defs.h
+index 65c9609ec20770759c08afa862e9988e89a1f0f4..3d0df6498b06e40c0005760ec6e00d80e996b98d 100644
+--- a/include/linux/lsm_hook_defs.h
++++ b/include/linux/lsm_hook_defs.h
+@@ -214,6 +214,7 @@ LSM_HOOK(int, 0, file_send_sigiotask, struct task_struct *tsk,
+ LSM_HOOK(int, 0, file_receive, struct file *file)
+ LSM_HOOK(int, 0, file_open, struct file *file)
+ LSM_HOOK(int, 0, file_post_open, struct file *file, int mask)
++LSM_HOOK(int, 0, file_clone, const struct file *source, struct file *file)
+ LSM_HOOK(int, 0, file_truncate, struct file *file)
+ LSM_HOOK(int, 0, task_alloc, struct task_struct *task,
+ 	 u64 clone_flags)
+diff --git a/include/linux/security.h b/include/linux/security.h
+index 153e9043058f884feaf525a5b2d55adbc9d2a442..01f77f3c90d84440afa84238bd5782203805b4c5 100644
+--- a/include/linux/security.h
++++ b/include/linux/security.h
+@@ -494,6 +494,7 @@ int security_file_send_sigiotask(struct task_struct *tsk,
+ int security_file_receive(struct file *file);
+ int security_file_open(struct file *file);
+ int security_file_post_open(struct file *file, int mask);
++int security_file_clone(const struct file *source, struct file *file);
+ int security_file_truncate(struct file *file);
+ int security_task_alloc(struct task_struct *task, u64 clone_flags);
+ void security_task_free(struct task_struct *task);
+@@ -1233,6 +1234,11 @@ static inline int security_file_post_open(struct file *file, int mask)
+ 	return 0;
+ }
+ 
++static inline int security_file_clone(const struct file *source, struct file *file)
++{
++	return 0;
++}
++
+ static inline int security_file_truncate(struct file *file)
+ {
+ 	return 0;
+diff --git a/include/uapi/linux/fcntl.h b/include/uapi/linux/fcntl.h
+index e43e3de3e9ee44a209448ebe1f907394a7c07ad6..17c874e843fcbc127fbc7a18bdd7d1f45e409cf2 100644
+--- a/include/uapi/linux/fcntl.h
++++ b/include/uapi/linux/fcntl.h
+@@ -84,6 +84,24 @@
+ #define F_GETDELEG		(F_LINUX_SPECIFIC_BASE + 15)
+ #define F_SETDELEG		(F_LINUX_SPECIFIC_BASE + 16)
+ 
++/* Monotonic regular-file capability operations (PoC). */
++#define F_GETFD_CAP		(F_LINUX_SPECIFIC_BASE + 17)
++#define F_RESTRICTFD_CAP	(F_LINUX_SPECIFIC_BASE + 18)
++#define F_CLONEFD_CAP		(F_LINUX_SPECIFIC_BASE + 19)
++
++#define FD_CAP_VERSION_1	1
++#define FD_CAP_F_CLOEXEC	(1U << 0)
++#define FD_CAP_READ		0
++#define FD_CAP_WRITE		1
++
++/* size includes this header and the variable-length rights bitmap. */
++struct fd_cap_request {
++	__u32 size;
++	__u16 version;
++	__u16 flags;
++	__u8 rights[];
++};
++
+ /* Argument structure for F_GETDELEG and F_SETDELEG */
+ struct delegation {
+ 	__u32	d_flags;	/* Must be 0 */
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 4bf26b0f1e6e36dc089cfa8abd90b015a943fd77..e67a822646870aeff8f31547073a9796d58df52e 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -22,6 +22,7 @@
+ #include <linux/capability.h>
+ #include <linux/init.h>
+ #include <linux/file.h>
++#include <linux/file_capability.h>
+ #include <linux/fs.h>
+ #include <linux/personality.h>
+ #include <linux/security.h>
+@@ -436,6 +437,13 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
+ 		if (!file_mmap_ok(file, inode, pgoff, len))
+ 			return -EOVERFLOW;
+ 
++		if (file_cap_managed(file) &&
++		    (!file_cap_has(file, FILE_CAP_READ) ||
++		     ((flags & MAP_TYPE) != MAP_PRIVATE &&
++		      (prot & PROT_WRITE) &&
++		      !file_cap_has(file, FILE_CAP_WRITE))))
++			return -EACCES;
++
+ 		flags_mask = LEGACY_MAP_MASK;
+ 		if (file->f_op->fop_flags & FOP_MMAP_SYNC)
+ 			flags_mask |= MAP_SYNC;
+@@ -469,9 +477,14 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
+ 				return -EACCES;
+ 
+ 			vma_flags_set(&vma_flags, VMA_SHARED_BIT, VMA_MAYSHARE_BIT);
+-			if (!(file->f_mode & FMODE_WRITE))
++			if (!(file->f_mode & FMODE_WRITE)) {
+ 				vma_flags_clear(&vma_flags, VMA_MAYWRITE_BIT,
+ 						VMA_SHARED_BIT);
++			} else if (file_cap_managed(file) &&
++				   !file_cap_has(file, FILE_CAP_WRITE)) {
++				/* Do not let a later mprotect() derive shared WRITE. */
++				vma_flags_clear(&vma_flags, VMA_MAYWRITE_BIT);
++			}
+ 			fallthrough;
+ 		case MAP_PRIVATE:
+ 			if (!(file->f_mode & FMODE_READ))
+diff --git a/security/apparmor/include/file.h b/security/apparmor/include/file.h
+index 1614c07fc53eea9778886d7d485ecbc5bde7646c..f9b62c8ca3c1a940328d4541d8c670837da9f2b7 100644
+--- a/security/apparmor/include/file.h
++++ b/security/apparmor/include/file.h
+@@ -29,7 +29,7 @@ struct path;
+ 				 AA_MAY_CHMOD | AA_MAY_CHOWN | AA_MAY_LOCK | \
+ 				 AA_EXEC_MMAP | AA_MAY_LINK)
+ 
+-static inline struct aa_file_ctx *file_ctx(struct file *file)
++static inline struct aa_file_ctx *file_ctx(const struct file *file)
+ {
+ 	return file->f_security + apparmor_blob_sizes.lbs_file;
+ }
+diff --git a/security/apparmor/lsm.c b/security/apparmor/lsm.c
+index d502ad0ac26f5cb10d8764eabe2fd2e149321200..61b56a0d3e109f2cc4e2b7fa0ca0172287b6ecef 100644
+--- a/security/apparmor/lsm.c
++++ b/security/apparmor/lsm.c
+@@ -517,6 +517,33 @@ static int apparmor_file_alloc_security(struct file *file)
+ 	return 0;
+ }
+ 
++static int apparmor_file_clone(const struct file *source, struct file *file)
++{
++	struct aa_file_ctx *src = file_ctx(source);
++	struct aa_file_ctx *dst = file_ctx(file);
++	struct aa_label *label, *old;
++	u32 allow;
++
++	/*
++	 * The open hooks used saved opener credentials, whereas allocation
++	 * initialized dst with the current label. Keep cached grants tied to
++	 * the source's validated label, never to that unrelated current label.
++	 * Snapshot only AppArmor-owned state, holding an independent label ref.
++	 */
++	spin_lock(&src->lock);
++	label = aa_get_label(rcu_dereference_protected(src->label,
++					      lockdep_is_held(&src->lock)));
++	allow = src->allow;
++	spin_unlock(&src->lock);
++
++	/* The destination is private until the clone operation publishes it. */
++	old = rcu_access_pointer(dst->label);
++	rcu_assign_pointer(dst->label, label);
++	dst->allow &= allow;
++	aa_put_label(old);
++	return 0;
++}
++
+ static void apparmor_file_free_security(struct file *file)
+ {
+ 	struct aa_file_ctx *ctx = file_ctx(file);
+@@ -1788,6 +1815,7 @@ static struct security_hook_list apparmor_hooks[] __ro_after_init = {
+ 	LSM_HOOK_INIT(inode_getattr, apparmor_inode_getattr),
+ 
+ 	LSM_HOOK_INIT(file_open, apparmor_file_open),
++	LSM_HOOK_INIT(file_clone, apparmor_file_clone),
+ 	LSM_HOOK_INIT(file_receive, apparmor_file_receive),
+ 	LSM_HOOK_INIT(file_permission, apparmor_file_permission),
+ 	LSM_HOOK_INIT(file_alloc_security, apparmor_file_alloc_security),
+diff --git a/security/landlock/fs.c b/security/landlock/fs.c
+index cab43892ec2f0ddf75a6031df33b6c56bc366e5c..304a11cf0398f75ec5139f7a227b6e8368da0e78 100644
+--- a/security/landlock/fs.c
++++ b/security/landlock/fs.c
+@@ -1925,6 +1925,21 @@ static int hook_file_open(struct file *const file)
+ 	return -EACCES;
+ }
+ 
++static int hook_file_clone(const struct file *const source,
++			   struct file *const file)
++{
++	/*
++	 * Reopening a pinned path with saved credentials can recompute more
++	 * optional access after a rename. Derivation must not recover access
++	 * that the source file did not carry. Reject instead of copying an
++	 * LSM blob or rewriting its cached denial/audit state.
++	 */
++	if (landlock_file(file)->allowed_access &
++	    ~landlock_file(source)->allowed_access & _LANDLOCK_ACCESS_FS_OPTIONAL)
++		return -EACCES;
++	return 0;
++}
++
+ static int hook_file_truncate(struct file *const file)
+ {
+ 	/*
+@@ -2104,6 +2119,7 @@ static struct security_hook_list landlock_hooks[] __ro_after_init = {
+ 
+ 	LSM_HOOK_INIT(file_alloc_security, hook_file_alloc_security),
+ 	LSM_HOOK_INIT(file_open, hook_file_open),
++	LSM_HOOK_INIT(file_clone, hook_file_clone),
+ 	LSM_HOOK_INIT(file_truncate, hook_file_truncate),
+ 	LSM_HOOK_INIT(file_ioctl, hook_file_ioctl),
+ 	LSM_HOOK_INIT(file_ioctl_compat, hook_file_ioctl_compat),
+diff --git a/security/security.c b/security/security.c
+index 2ee276ab15c5bcb55662a94fc9e654d9fa55619c..68ec4ebf003a75b6fb9dedc45849a0f93bf0695e 100644
+--- a/security/security.c
++++ b/security/security.c
+@@ -2756,6 +2756,23 @@ int security_file_post_open(struct file *file, int mask)
+ }
+ EXPORT_SYMBOL_GPL(security_file_post_open);
+ 
++/**
++ * security_file_clone() - Check derivation of a new file description
++ * @source: referenced source file
++ * @file: newly opened, not yet exposed destination file
++ *
++ * Called after the normal open and post-open hooks. An LSM can reject a
++ * derivation that would lose restrictions cached in the source file's
++ * security state. The files have independent security blobs; neither the
++ * source state nor the destination's ordinary open checks may be bypassed.
++ *
++ * Return: Returns 0 if derivation is permitted, or a negative error code.
++ */
++int security_file_clone(const struct file *source, struct file *file)
++{
++	return call_int_hook(file_clone, source, file);
++}
++
+ /**
+  * security_file_truncate() - Check if truncating a file is allowed
+  * @file: file
+diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
+index 3f4a6ddee32251b056cbc45fa2f457bb436b6822..634c7fc30533a8b6fcc9e4c41cc410b2c7131784 100644
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -4310,6 +4310,9 @@ static int selinux_file_fcntl(struct file *file, unsigned int cmd,
+ 	case F_GETOWN:
+ 	case F_GETSIG:
+ 	case F_GETOWNER_UIDS:
++	case F_GETFD_CAP:
++	case F_RESTRICTFD_CAP:
++	case F_CLONEFD_CAP:
+ 		/* Just check FD__USE permission */
+ 		err = file_has_perm(cred, file, 0);
+ 		break;

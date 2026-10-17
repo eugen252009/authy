@@ -1,0 +1,1725 @@
+From c8b8dde1d872f7ced4169b7a1109f44577a31c2b Mon Sep 17 00:00:00 2001
+From: Eugen <eugen252009@gmail.com>
+Date: Sat, 17 Oct 2026 10:22:53 +0200
+Subject: [PATCH 9/9] docs: authority: record experimental v1 qualification and
+ roadmap
+
+Record the CONDITIONAL GO experimental baseline, chronological evidence/accepted limitations and permanent A_out subset invariant. Publish planning-only future-class/regression requirements, not new capabilities or archived runtime artifacts. Preserve qualified documentation bytes, including existing Markdown hard-break spaces or blank lines at EOF; no source formatting or runtime behavior is changed.
+---
+ .../authority/FILESYSTEM-V1-BASELINE.md       | 248 +++++
+ Documentation/authority/FUTURE-REGRESSION.md  |  73 ++
+ Documentation/authority/NEXT-PHASE.md         | 130 +++
+ .../authority/filesystem-v1-matrix.md         | 121 +++
+ Documentation/authority/landlock-audit.md     | 123 +++
+ .../authority/qualification-status.md         | 972 ++++++++++++++++++
+ 6 files changed, 1667 insertions(+)
+ create mode 100644 Documentation/authority/FILESYSTEM-V1-BASELINE.md
+ create mode 100644 Documentation/authority/FUTURE-REGRESSION.md
+ create mode 100644 Documentation/authority/NEXT-PHASE.md
+ create mode 100644 Documentation/authority/filesystem-v1-matrix.md
+ create mode 100644 Documentation/authority/landlock-audit.md
+ create mode 100644 Documentation/authority/qualification-status.md
+
+diff --git a/Documentation/authority/FILESYSTEM-V1-BASELINE.md b/Documentation/authority/FILESYSTEM-V1-BASELINE.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff331cd612c623d2ff8283161d7cc8d64047df1f
+--- /dev/null
++++ b/Documentation/authority/FILESYSTEM-V1-BASELINE.md
+@@ -0,0 +1,248 @@
++# Filesystem Authority v1 baseline
++
++## Identity and authority of this document
++
++**Version:** `filesystem-v1-experimental-20261017-r1`  
++**Decision:** **CONDITIONAL GO — Experimental v1**  
++**Base revision:** `e767a4ea70a3992c37ed604157d32f0dfbf9b1e3` (Linux 7.3.0-rc5)
++
++HEAD alone is **not** the implementation identity. The reference is that exact
++base plus the complete three-part source patch series, required formerly
++untracked files, and manifests in:
++
++`/var/tmp/authority-evidence-archive/filesystem-v1-baseline/`
++
++`VERSION.json` identifies the production-code manifest, full source manifest,
++patches and source artifacts by SHA-256. The tested production code is unchanged
++from the final qualification checkpoint; baseline/roadmap documentation was
++added afterward and is explicitly classified as publication documentation, not
++new runtime evidence. No production behavior, UAPI or class changed to freeze it.
++
++This is the authoritative **project experimental baseline**, not normative
++upstream Linux ABI documentation, a complete security system or a production
++release. Historical NO-GO checkpoints remain preserved; the final conditional
++attribution decision does not rewrite their logs or assertions.
++
++## Status vocabulary
++
++* **IMPLEMENTED:** code exists in this snapshot, not automatically fully tested.
++* **QUALIFIED:** supported by the exact recorded configuration/workload evidence.
++* **EXPERIMENTAL:** prototype interfaces/integration; no production stability ABI.
++* **PLANNED:** architecture candidate or future milestone, not usable behavior.
++* **NOT IMPLEMENTED:** no such kernel/user-facing capability is claimed.
++* **ACCEPTED LIMITATION:** an explicit boundary with justification, not a PASS
++  for an unavailable configuration or a hidden security failure.
++
++## Purpose and implemented core
++
++The project develops Linux-kernel Authority semantics without replacing Linux.
++It separates operational authority/provenance from identity, ownership and
++legacy policy while preserving independent Linux security restrictions.
++
++**IMPLEMENTED / EXPERIMENTAL:** a small static Authority Core with class-local
++operation dispatch, immutable refcounted credential-associated state, typed
++synchronous request context, positive rights and handled-operation state.
++UNHANDLED continues native Linux; handled/implemented evaluates the owning
++class; handled/unimplemented fails closed. Only the filesystem class is a
++production class. The KUnit synthetic class is test-only, not another resource
++class or userspace ABI. See architecture.md and temporal-semantics.md.
++
++## Permanent invariant and future-class requirement
++
++**A_out ⊆ A_in**
++
++Every individual transformation must be bounded by the effective, legitimately
++supplied and delegable authority at that transformation's creation point.
++Inputs must identify source provenance, explicit rights, applicable restrictions,
++cached LSM state, saved execution contexts and independently authorized grants.
++Additional authority requires a separately valid, explicitly authorized source.
++
++Legitimate delegation does **not** require attenuation: preservation is valid.
++Independent capability clones may retain all legitimately supplied rights.
++A later source reduction does not retroactively alter an already legitimate
++independent capability. Shared mutable capability state follows its documented
++sharing contract. Local attenuation, registry removal and global revocation
++are distinct. UID 0 alone cannot recreate omitted handled Authority; an actual
++held broader capability must be identified as an input, not hidden as identity.
++Independently applicable DAC/ACL, LSM, filesystem, mount, immutable-state,
++namespace, device and structural Linux restrictions remain effective according
++to the existing qualified composition contract.
++
++Every future Authority class must supply reproducible tests for this invariant,
++provenance, temporal independence, shared-state changes, transfer/inheritance,
++concurrency/linearization, and native/LSM compatibility before qualification.
++It may not invent a different security philosophy or call unimplemented policy
++UNHANDLED when the class contract says fail closed. See
++[FUTURE-REGRESSION.md](FUTURE-REGRESSION.md).
++
++## Capability lifecycle and temporal semantics
++
++| Primitive | IMPLEMENTED contract |
++|---|---|
++| F_GETFD_CAP | Observes bitmap/mode-derived rights; not a grant or a complete LSM-permission oracle |
++| F_RESTRICTFD_CAP | Monotonically attenuates mutable authority on the shared open file description |
++| F_CLONEFD_CAP | Creates an independent description/private ceiling bounded by the legitimate source, requested maximum, mode and applicable LSM checks; initial position is copied, subsequent offsets are independent |
++| dup/forked FD/SCM_RIGHTS/pidfd/fixed io_uring file | References/imports the existing description; attenuation sharing is not independent cloning |
++| Scope construction | Explicit privileged grant using pinned mount+dentry identity; currently requires CAP_SYS_ADMIN; not available after confinement |
++| Confinement/local scope reduction | Installs replacement immutable credential/Authority state; not mutation of every old holder |
++| fork/exec credentials | Retain appropriate referenced snapshots and confinement under the existing credential/exec contract |
++| io_uring personality | Explicit registration retains a legitimate complete credential including Authority; later registration captures the later reduced state |
++| unregister/ring close | Remove namespace/lifetime references; prepared requests and already acquired FDs have their own legitimate lifetimes |
++
++**QUALIFIED:** the focused personality verdict is **EXPECTED_VALID_DELEGATION**.
++Same-UID and retained-root tests distinguish actual captured Authority from
++identity-only retention. READ-only/zero handled-data snapshots cannot recreate
++WRITE or escape scope. Default submission does not implicitly use an old ring
++opener context. Forced async execution, current LSM adoption vetoes and saved
++LSM restrictions were tested. No credential rebasing or retroactive attenuation
++was introduced. Global/object-level revocation is **NOT IMPLEMENTED**.
++
++## Filesystem implementation and qualification scope
++
++**IMPLEMENTED / QUALIFIED within the recorded boundaries:** regular-file
++READ/WRITE establishment/use and bounded CREATE, DELETE, RENAME and LINK
++integration; direct-child prototype APIs plus documented VFS paths; path and FD
++truncate; supported FD attenuation/derivation and selected transfer/mmap paths.
++CREATE is not an implicit data grant. Exact-parent namespace requirements,
++source eligibility, structural errors and independent security remain distinct.
++TRAVERSE exists in bounded lookup integration but is not selectable as a fully
++mandatory handled operation by this experimental UAPI.
++
++**QUALIFIED FD implementation:** regular files on rootfs, ramfs and tmpfs,
++excluding O_PATH/backing/unsupported objects and selected async/owner state.
++Other filesystems do not acquire clone/attenuation support merely because
++ordinary path ceilings exist. Unsupported custom FD operations fail explicitly.
++
++**QUALIFIED bounded additional paths:** tmpfs idmapped ownership/DAC/ACL and
++mount-bound scopes; selected overlay permission-callback denials/allowed controls;
++generic/XFS handle acquisition and fanotify fresh descriptions; ordinary
++io_uring OPENAT/personality/fixed-file routes; established transfer/lifetime
++and source-scope versus bearer distinctions. NFS/FUSE/all callback stacks,
++arbitrary idmaps/namespace combinations, every ioctl/device and every async
++mode are not generally qualified. Metadata/anonymous storage remain documented
++legacy or out-of-path boundaries, not newly invented filesystem semantics.
++
++## Build/configuration support
++
++**QUALIFIED:** recorded x86_64 q35/KVM configurations, IA32 userspace compatibility,
++regular, KASAN/lockdep, strict KCSAN and selected LSM/policy fixtures. Full .configs,
++not fragments alone, identify actual images. Static tests use GCC 14.2.0-19/
++binutils 2.44 and the modified installed UAPI; exact tool/image/command records
++remain evidence, not a claim of bit-identical rebuilds across environments.
++
++**ACCEPTED LIMITATION:** Authority is linked unconditionally by existing obj-y
++integration. No independent feature-off Kconfig/runtime selector exists. Requested
++configuration B was BLOCKED/not selectable/not executed; pristine A and
++UNHANDLED are never renamed feature-off B. No switch was added for a test matrix.
++Stock Kconfig source is present in the base; test fragments and full qualified
++.configs select required Linux facilities. There is no missing Authority Kconfig
++patch to invent. Other architectures/native 32-bit kernels are not qualified.
++
++## LSM interoperability
++
++**QUALIFIED selected fixtures:** Landlock, enforcing SELinux and AppArmor,
++including cached-TRUNCATE no-amplification, source-context preservation, native
++assertion accounting, clone/cache/FD-use guards, temporal adoption veto and saved
++file denials, plus recorded stacked configurations. This is not every LSM,
++distribution policy, policy-reload interleaving or arbitrary stack.
++
++AppArmor io_uring denial requires a policy ABI opting into the kernel-advertised
++mediation class. The initial default-ABI fixture failure is preserved; the
++expectation/kernel checks were not weakened. Saved credentials are not automatically
++permission grants and opaque LSM blobs are not generically copied.
++
++## Evidence and gates
++
++Retained historical results, **not tests freshly executed by this freeze**:
++
++| Recorded workload | Result |
++|---|---|
++| Full regular / KASAN set, each | 536 PASS / 0 FAIL / 11 SKIP |
++| Compat32 original three suites | 42 PASS / 0 FAIL |
++| Core synthetic KUnit checks | 10/10 separately |
++| Temporal regular/KASAN/strict, each | 15 PASS / 0 FAIL / 1 SKIP |
++| Temporal pristine regular/strict, each | 2 PASS / 0 FAIL / 14 SKIP |
++| Authority/filesystem/Landlock temporal regressions | 42 PASS / 0 FAIL |
++| Temporal enforcing SELinux/AppArmor, each selected config | 3 PASS / 0 FAIL |
++| Bounded LTP per current/pristine image | 24 executable exits zero; 331 modern summary passes; legacy fcntl01 has no invented assertion count |
++
++Grouped cases, syscall assertions, executables and repeated configurations must
++not be added together. Earlier 533/0/14 and expanded 536/0/11 are different
++coverage/configuration checkpoints, not interchangeable numbers.
++
++Final gates: A/B/C/D/G **PASS**; E/F/H **ACCEPTED LIMITATION**.
++The timer cpuevt.ignore and software serial IER startup/IRQ pairs are attributed
++**UPSTREAM_EXISTING_INDEPENDENT** through source/instruction/layout/synchronization
++and historical-context analysis. Their exact reports were **not observed on
++pristine** in available logs. Finite absence is not proof, independence is not
++universal benignness, and no whole-kernel sanitizer-clean claim follows. The
++read-only final attribution checkpoint executed no new kernel workload; its
++additional intrusive campaign remained blocked/not executed. These conditions
++are retained rather than erased by freezing the reference.
++
++Evidence chain: closure/REPORT.md (historical NO-GO), temporal-authority/REPORT.md
++(personality adjudication), kcsan-closure/REPORT.md (latest CONDITIONAL GO), and
++qualification-status.md chronological ledger. Baseline evidence includes copies
++of all four required persistent archives, their hashes, reports, configs and
++reproduction materials; qualification-evidence.tar.gz contains earlier supporting
++source/build/rootfs/test dependencies. Incomplete failed archives remain outside
++this new baseline and are never credited as complete qualification.
++
++## Exact reconstruction and exclusion policy
++
++The source artifact contains the full pristine base, three complete patches,
++a ready-to-extract qualified full-source archive and a full file/mode/symlink
++manifest. Reconstruction is verified in disposable directories, not by changing
++the original worktree. New implementation headers/C files, test sources/runners
++and documentation that were untracked in Git are included explicitly.
++
++The unrelated `.gitignore` CocoIndex tooling addition is excluded from the
++qualified source and saved separately. The original worktree is untouched by
++reconstruction. Relevant generated `usr/include` exports are not smuggled in as
++source; modified UAPI and Linux headers_install regenerate them. Qualified
++.configs and retained test/build dependencies accompany the evidence. No generated
++.o, vmlinux, compiler cache, index database or repository-private metadata is a
++source input. Historical images/configs/generated artifacts remain archived.
++
++From the baseline package, in a new disposable directory:
++
++```
++sha256sum -c SHA256SUMS
++python3 scripts/reconstruct.py --output /new/disposable/linux-authority-v1
++python3 scripts/verify-source.py source/expected-source.json /new/disposable/linux-authority-v1
++```
++
++Use the package README for exact build/header/test/QEMU commands and optional
++full evidence restoration. Reconstruction verifies all source files, symlink
++targets and executable bits, not just the list of changed filenames. A second
++extraction of qualified-source.tar.gz must yield the same manifest. No kernel
++installation or host reboot is part of reproduction.
++
++## Versioning and future comparisons
++
++**PROPOSED, NOT CREATED:** branch `authority/filesystem-v1` for an eventual
++review/import branch; immutable release tag
++`authority/filesystem-v1-experimental-20261017-r1` only after explicit commit/tag
++authorization and verification of the imported tree. Neither Git ref exists as
++a result of this task. HEAD alone and a mutable proposed branch are not releases.
++
++The local content-addressed/read-only snapshot plus its externally recorded
++SHA-256 manifest is the frozen reference. Read-only permissions are operational
++sealing, not protection from a privileged owner rewriting storage. Back it up
++independently; local /tmp and /var/tmp are not durable off-machine storage.
++Never update this version in place: compare a new candidate's production/tests,
++record its delta and rerun affected regression gates. Create a new version and
++qualification decision if it changes the implementation.
++
++## Non-goals and next phase
++
++No complete mediation, universal process sandbox, production-ready ABI, complete
++mandatory traversal, global revocation, no-delegation flag, Rescue Authority,
++irreversible object sealing, permission CLI or restricted native module isolation
++is implemented or inferred. Ordinary native modules remain inside the privileged
++kernel TCB; restricting untrusted native code would need separate isolation.
++The development target remains Linux, not a replacement operating-system kernel.
++
++[Next-phase roadmap](NEXT-PHASE.md) and [regression requirements](FUTURE-REGRESSION.md)
++prepare extensions using the existing central model, Linux lifecycle/LSM/Audit
++and testing infrastructure. They do not add new classes or production code.
+diff --git a/Documentation/authority/FUTURE-REGRESSION.md b/Documentation/authority/FUTURE-REGRESSION.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..86a20ac3d076a33dc002fc614257139562ac91f8
+--- /dev/null
++++ b/Documentation/authority/FUTURE-REGRESSION.md
+@@ -0,0 +1,73 @@
++# Mandatory regression requirements after the experimental v1 freeze
++
++Permanent requirement: **A_out ⊆ A_in** for each individual transformation at
++its effective creation point, with legitimate provenance, effective restrictions,
++independent grants and the class's defined delegation permissions accounted for.
++Every future class must demonstrate this through reproducible tests.
++
++Do not compare an independent historical capability against its source's later
++reduced state. Do not call two descriptor numbers independent. Do not reconstruct
++rights from UID 0 or an identity-only snapshot. Shared-state attenuation, task
++credential COW, private clone ownership and explicit global revocation are
++separate contracts. Existing LSM/DAC/namespace/filesystem/device restrictions
++remain applicable according to their documented composition boundary.
++
++## Before any candidate qualification
++
++1. Verify the frozen baseline manifest and reconstruct it independently. Record
++   candidate base, complete tracked/untracked source delta and exact source/code
++   hashes. Preserve baseline artifacts; never update the baseline version in place.
++2. Classify each affected transformation: actual input/holder, grant provenance,
++   output object, aliasing/independence, restrictions, lifetime and linearization.
++   Identify absent, unhandled and claimed-but-unimplemented operations explicitly.
++3. Declare affected configs/workloads from source changes, not from convenient
++   earlier PASS totals. Build the actual candidate source including untracked
++   files. Retain full .config, toolchain, UAPI headers, binaries and QEMU commands.
++4. Keep native controls, custom Authority assertions, LSM denials, fixture setup,
++   FAIL/SKIP/BROKEN/BLOCKED and executable/group/assertion counts separate.
++5. Do not silently weaken assertions/LSM rules or rebase saved credentials to
++   obtain green results. Explain fixture failures and retain failed runs.
++
++## Minimum change-impact matrix
++
++| Change surface | Required retained/new checks |
++|---|---|
++| Core classification/state/registry | Core KUnit, unhandled/implemented/unimplemented/unknown cases, immutable handled-state reductions; old filesystem and temporal suites |
++| Filesystem evaluator/scope/DAC/VFS | authority_test, qualification_test, meaningful ramfs variant, idmapped_test, callback_test, acquisition/handle tests where path affected; matched native/pristine comparisons and relevant LTP subset |
++| FD clone/restrict/description lifetime | zero/R/RW maximum intersection, before/after/concurrent reduction, independent retention/re-delegation, shared dup/SCM/fork/fixed slots, offset/mode/flags, mmap/mprotect/transfers, close/reuse; temporal_test and relevant Landlock regressions |
++| Credentials/fork/exec | objective versus subjective issuer state, COW snapshots, inherited established handles, confined exec persistence, same UID with different Authority, no source-identity-only restoration; temporal and LSM adoption tests |
++| Delegation/attenuation | actual legitimate source, transfer/recipient restrictions, independent versus shared state and explicitly authorized additional grants; no implicit retroactive revocation; existing temporal/FD coverage plus candidate boundary tests |
++| LSM/context/cache hooks | focused Landlock/SELinux/AppArmor with allowed controls and independent denials, saved optional/cache constraints, enforcing selected stacks, current adoption veto; matching policy ABI and failed-fixture retention |
++| Async execution/ring/personality | registration before/after reduction, default issuer versus explicit context, in-flight/unregister/teardown, inherited/shared ring namespace, EBUSY/ordering, LSM veto; test any newly claimed async mode separately |
++| User/mount/other namespaces | stable object identity, idmaps, cross-mount/namespace errors, constructor privilege and DAC/ACL/LSM checks; namespace combinations must not be inferred passing |
++| Concurrency/object ownership | bounded races with defined legal outcomes, completed-reduction ordering, UAF/double-free/reference lifetime; appropriate KASAN/lockdep/strict KCSAN differential controls and reviewed reports |
++| UAPI/build/config compatibility | native and IA32 where supported, malformed/version/size/unknown bits, correct errors/failure atomicity, supported config builds and Linux compatibility; no fictitious feature-off result |
++| New resource class | typed context/state/evaluator and lifecycle checks for all above applicable surfaces; reproducible class-specific provenance, alias/independence, delegation, inheritance, effective restrictions and fail-closed behavior |
++
++Reuse tools/testing/selftests/authority/ and run-qemu.sh; existing specialized LSM,
++XFS, idmap and acquisition fixture recipes are in the frozen evidence. Do not
++create a parallel general runner, audit store or lifecycle subsystem merely
++because a new class is being considered. Extend the owning tests narrowly.
++
++At minimum no unauthorized amplification, no restoration from a locally reduced
++input, correct temporal independence, correct alias propagation, no unintended
++native Linux/LSM regression, and no unexplained applicable lifetime/concurrency
++defect may remain for a claimed feature. New explicit global revocation would
++require a separate defined contract and tests; the current absent API remains
++SKIP/unimplemented, not a preexisting mechanism to reuse by assumption.
++
++## Requalification and decisions
++
++Source equality can establish applicability of retained historical evidence;
++it does not convert it into a newly executed run. No production change requires
++unrelated expensive suites to be repeated without cause. A relevant change must
++rerun its affected suites/instrumentation, and a new unknown source state cannot
++inherit PASS solely from a similar branch name.
++
++Keep the existing eight independent gates and their accepted boundaries. New
++findings need memory/stack/synchronization/source/config/workload analysis, not
++warning-string dismissal. Independent upstream classification is attribution,
++not a claim of harmlessness or sanitizer-clean Linux. Execution restrictions
++remain BLOCKED/not executed, never worked around. No host deployment or reboot
++is needed. Assign a new candidate version/decision; do not mutate the frozen
++experimental v1 reference or manufacture GO from high pass counts.
+diff --git a/Documentation/authority/NEXT-PHASE.md b/Documentation/authority/NEXT-PHASE.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..9658fe0009a73061ca0acc3b6d2aee72b4331eea
+--- /dev/null
++++ b/Documentation/authority/NEXT-PHASE.md
+@@ -0,0 +1,130 @@
++# Next Authority development phase — planning only
++
++Status: **PLANNED / NOT IMPLEMENTED**. Filesystem v1 remains the frozen
++[experimental reference](FILESYSTEM-V1-BASELINE.md). This document creates no
++class, UAPI, command, grant mechanism or new security guarantee.
++
++## One model, not one philosophy per resource
++
++Every candidate uses **A_out ⊆ A_in** at each transformation's creation point.
++A design must identify its legitimate inputs, provenance and delegation source;
++independent versus shared state; local attenuation versus explicit revocation;
++issuer/recipient/inherited/saved contexts; lifetime and concurrent ordering;
++independent Linux restrictions; and absent/unhandled versus claimed-but-missing
++behavior. Existing file-capability or identity alone must not be mistaken for
++permission to operate on a different resource. Tests precede qualification.
++
++The current static Core registry, three-state dispatcher, immutable per-class
++credential state and clone/destroy hooks are useful foundations. They are not
++proof of plug-and-play multi-resource support: the only production evaluator is
++filesystem-owned, the request union currently has only a filesystem context,
++and scope storage/support checks remain filesystem-shaped. Any future extension
++must introduce only its own genuinely required typed state/context/lifecycle,
++not turn struct path into a universal object or duplicate a second policy Core.
++Changes to common representation require old-v1 regressions and a bounded review.
++
++## Candidate evaluation
++
++| Candidate | Linux integration / provenance | Lifecycle and inheritance | Independent controls / ABI / complexity |
++|---|---|---|---|
++| Process Authority | Start with stable pidfd/task references and a narrowly specified operation inventory: signals, inspection/ptrace, process-handle imports and credential/context transitions are separate questions. A PID number alone is not stable provenance. | Decide child versus external-task authority, exec/credential changes, task exit/PID reuse, thread-group versus per-task state, holder delegation and snapshot lifetime. Do not revoke old independent contexts by inference. | Existing ptrace/kill/pidfd checks, user/PID namespaces, LSM and capability gates stay effective. Highest semantic sensitivity; no broad new syscall or public bitmap until actor/target/linearization is agreed. |
++| IPC Authority | Connected Unix endpoints, queues/semaphores/shared IPC handles and SCM_RIGHTS require distinct inventories. Reuse Linux endpoints/namespace IDs with stable object ownership, not a separate IPC broker inside Core. | Separate ability to use an endpoint from permission to transfer capabilities. Define sender input, receiver eligibility, shared aliases, inbound/outbound delegation, queued/in-flight messages, fork/exec and last close. | Linux DAC/IPC permissions, namespace rules, LSM/socket hooks and current descriptor transfer guards remain. Moderate-to-high testing complexity; prefer existing operations and no new ABI unless necessary. |
++| Anonymous/shared memory resources | Distinguish ordinary private heap/anonymous memory from externally supplied/shared resources: memfd, shm, externally shared mappings and cross-process memory access. Creating private computation state is not an external-authority grant. | Define handle/VMA relationship, COW versus shared pages, mmap/mprotect, sealing if already native, truncate, fork/exec and transfer, eviction/reuse and in-flight references. | Native VM/mm, memfd seals, SysV/POSIX IPC, ptrace and LSM remain. High aliasing/lifetime complexity; no global memory quota/logging/store subsystem in Core. |
++| Network Authority | Socket creation, bind/listen/accept, connect and established send/receive are distinct. Define stable socket/endpoint capability provenance, address scope and namespace identity without a new DNS or network stack. | Define accepted-socket derivation, connected-handle retention, descriptor transfer, async work, connection migration/rebinding and policy change semantics. Local reduction must not implicitly revoke every connection. | Existing socket permissions, LSM, net namespaces, capabilities and network policy remain independent. High environmental/test complexity; native loopback/netns fixtures first, not indiscriminate external network tests. |
++| Device Authority | Device acquisition, regular data I/O, specific ioctl families, mappings/DMA and control-plane effects cannot be inferred from READ/WRITE labels. Define device-specific audited scope, if any. | Stable device/open-description provenance, hotplug, driver private state, dup/transfer, mapping lifetime and asynchronous completion need explicit contracts. | Device cgroups, LSM, capabilities, driver checks and Linux subsystems remain. Highest heterogeneous implementation risk; do not extend the v1 simple-filesystem clone allowlist to devices. No native-driver isolation is implied. |
++
++For each candidate, a missing class initially remains outside the qualified
++scope and follows the existing unhandled contract. It must not be advertised as
++confined merely because a filesystem domain is active. When a class claims an
++operation, unimplemented/unknown claimed cases must fail closed according to its
++actual selected mode. No new class-wide sealing ABI is assumed.
++
++## Recommended order and rationale
++
++1. **Process Authority contract and minimum pidfd-centered feasibility slice.**
++   Process subjects, task ownership, inherited execution contexts and external
++   task references underpin cross-process delegation and later IPC/shared-memory
++   designs. The first step is the contract/invariant matrix, not wholesale control
++   of fork/exec or redesign of credentials. Constrain the first implementation to
++   a small reviewed target-operation set only after its design is approved.
++2. **IPC endpoint/transfer Authority.** Build on stable process/peer semantics and
++   existing SCM/descriptor machinery. Resolve inbound/outbound delegation before
++   claiming a no-delegation option. Keep queued and already issued capabilities
++   temporally distinct from future send/receive permission.
++3. **Externally shared/anonymous-storage resource semantics.** Coordinate with
++   IPC and process access; preserve free ordinary private computation/allocation.
++   Reuse mm/VMA/memfd lifetime mechanisms rather than adding storage to Core.
++4. **Network Authority.** Apply the same proven acquisition/established-use and
++   async/transfer model to sockets with isolated netns tests. Do not conflate
++   names/addresses with stable capability ownership or implement custom networking.
++5. **Device Authority last.** Start with explicitly audited device operations
++   only after common context/lifetime/async semantics are established. Never
++   presume ioctl/mmap/DMA effects are generic file authority.
++
++This is a dependency/risk recommendation, not authorization to implement these
++classes now. Process semantics are high risk, hence its first milestone is a
++small evidence-backed design; discovery can revise the ordering with reasons.
++
++## Next milestone: M1 process contract, no public ABI commitment
++
++Deliverables for the next authorized phase:
++
++* Inventory relevant pidfd/kill/ptrace/task/credential/exec call paths and exact
++  existing Linux checks using the same Core three-state vocabulary.
++* Specify actor, stable target, legitimate input/grant, operation, inheritance,
++  transfer and local attenuation for a deliberately minimal operation set.
++* Write the alias-versus-independent and saved-context temporal cases before
++  proposing new rights, including successful and denied native controls.
++* Define handling of task exit/PID reuse, multithreading, namespaces, concurrent
++  transfer/reduction and LSM restriction. Identify explicitly unimplemented cases.
++* Record the smallest necessary typed context/state changes and show why existing
++  Core mechanisms suffice or where they do not. Keep filesystem semantics owned
++  by filesystem code.
++* Propose tests using KUnit/kselftest and the existing isolated QEMU runner;
++  preserve the frozen v1 source/code identity and affected regression matrix.
++* Obtain design/implementation authorization before adding a production class,
++  public UAPI or any broad process-confinement claim.
++
++Acceptance is a reviewed design/provenance/invariant test plan, not a new feature
++or a passing test count obtained by shrinking the claimed contract.
++
++## Future interface vision — not current commands
++
++Illustrative **PLANNED** syntax only:
++
++```
++permission run --none -- ./program
++permission run --none --no-delegation -- ./program
++```
++
++`--none` means no initially granted external Authority. Explicit initial handles
++remain governed by their own legitimate capabilities/contracts and must be
++listed, attenuated or deliberately retained; identity or an inherited broader
++ring/broker is not silently erased by a slogan. Ordinary computation and private
++memory allocation should not require external Authority.
++
++`--no-delegation` is a separate future policy, not a synonym for an empty initial
++grant. Its inbound and outbound meaning, per-class boundaries, recipients,
++independent grants, broker requests, inherited/initial handles, queued operations
++and concurrency must be explicitly defined before implementation. It is **NOT
++IMPLEMENTED**, not a current prctl/fcntl option and not part of v1 tests.
++
++Other **PLANNED / NOT IMPLEMENTED** work includes Rescue Authority, explicit
++irreversible object sealing, richer Linux Audit reporting, TPA package-level
++permission declarations and service-manager integration. Native memfd seals or
++internal test-only sealed class state do not establish those future features.
++Restricted kernel components are long-term research only: ordinary native Linux
++modules are privileged kernel code, and meaningful restrictions need execution
++or memory isolation absent from this Core. Kernel-module restriction is not an
++active implementation goal. Linux remains the target, not a new OS kernel.
++
++## Infrastructure discipline
++
++Use Linux Audit for future security-event reporting where required; do not build
++an Authority-specific logging daemon/storage database. Use Linux Kconfig/Kbuild,
++KUnit/kselftest, namespaces, descriptors/process lifetimes and LSM hooks. Package
++and service-manager declarations belong in their existing layers; no package
++manager/process manager/network stack belongs inside Core. Keep any eventual
++ABI small, justified, versioned and fail-closed; document unsupported states.
++
++No implementation in this freeze is claimed for any item in this roadmap.
+diff --git a/Documentation/authority/filesystem-v1-matrix.md b/Documentation/authority/filesystem-v1-matrix.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..922a382f77993c56e1c3988069e3b0d3215d223f
+--- /dev/null
++++ b/Documentation/authority/filesystem-v1-matrix.md
+@@ -0,0 +1,121 @@
++# Filesystem Authority v1 review matrix
++
++This is a **bounded qualification inventory**, not a new security contract.
++The accepted handled bitmap is CREATE_FILE, READ_FILE, WRITE_FILE,
++DELETE_FILE, RENAME and LINK. The production registry contains only the
++filesystem class. A missing class is UNHANDLED. Existing FDs/mappings are not
++revoked. Process, anonymous-storage, IPC and network authority remain absent.
++
++## Decision columns and independent restrictions
++
++* **L**: ordinary Linux DAC/capabilities, filesystem and LSM restrictions.
++* **U**: operation unhandled: retain L (including established additive scopes).
++  No semantic scope is required just because some *other* operation is handled.
++* **H+**: implemented, handled, matching scope: semantic permission can satisfy
++  a bounded generic DAC EACCES; independent restrictions must still allow.
++* **H-**: implemented, handled, missing/wrong scope: EACCES, even for root.
++* **X**: handled but unimplemented: EOPNOTSUPP, no legacy fallback. Exercised
++  inside the Core by its synthetic KUnit class; the current filesystem UAPI
++  rejects unsupported handled bits at entry. There is no syscall-selectable
++  X state for mkdir/stat/etc. An absent/unclaimed class is U, not X.
++
++No grant supersedes LSM denials, read-only mounts, immutable/append-only,
++sticky-bit, source-link eligibility, link count, idmap validity, filesystem
++callbacks or cross-mount restrictions. Tests below exercise only subsets of
++those independent restrictions. errno is allowed to reflect an earlier VFS
++restriction; the negative tests check exact errno for their controlled fixtures
++and verify mutation state where relevant.
++
++| Operation / path | L / U | H+ / H- | X / coverage / outstanding boundary |
++|---|---|---|---|
++| open / openat / openat2 regular existing file | normal access-mode DAC | per-operation READ/WRITE; O_RDWR needs both | Core X only; all three exercised, allowed and denied |
++| named O_CREAT | Linux initial requested FD mode | CREATE and **handled** initial READ/WRITE checked before instantiation | Regression fixes U rejecting initial FD; tested absence of denied new name |
++| O_TMPFILE | Linux initial requested FD mode | independent creation/data scopes | U regression tested; broad historical mask matrix not restored |
++| read/write/pread/pwrite | established description, LSM file_permission | managed FD bits (EBADF when missing), not new pathname checks | positive/negative data and clone/dup cases executed |
++| truncate(path) | fresh WRITE via generic provider | WRITE scope / EACCES | length checked in deny matrix; semantic positive covered narrowly |
++| ftruncate | established FD, independent inode/LSM constraints | managed WRITE ceiling / EBADF | positive and denied cases executed |
++| mkdir/rmdir, unlinkat(AT_REMOVEDIR) | L/U, no separate modeled operation | no selectable mkdir/rmdir authority | Executed successfully under all six handled operations; NOT a confinement guarantee |
++| symlink/symlinkat | L/U, no modeled creation right | no selectable SYMLINK authority | creation executed under handled mask; followed target still checked for fresh data access |
++| stat/fstat/statx | L/U and normal lookup | no metadata-visibility ceiling | exercised; readable metadata outside scopes is intentionally not claimed as denied |
++| unlink/unlinkat(non-directory) | ordinary VFS checks | exact parent DELETE | syscall matrix plus original direct capability-API tests; rmdir is separate |
++| rename/renameat2(flags=0), regular file | ordinary VFS checks | exact source AND destination RENAME | positive/negative and original direct API tests; directory/exchange semantics are not generally qualified |
++| link/linkat | ordinary source eligibility and destination VFS | exact destination LINK | direct allowed/denied destination, outside-name absence; AT_EMPTY_PATH/foreign f_cred history not rerun |
++| bounded directory traversal | L/U plus additive TRAVERSE on scoped lookups | TRAVERSE cannot be handled by this UAPI | BENEATH EXDEV, IN_ROOT rebasing, dotdot, symlink escape exercised; ordinary chdir outside scope succeeds |
++| absolute/relative symlink resolution | L/U | final resolved data object's scope matters | sibling escape denied; concurrent symlink exchange leaves outside contents unchanged |
++| bind alias / mount namespace | normal namespace and mount rules | scope uses pinned mount+dentry, not inode alone | bind alias denied; inherited handles pin old namespace mounts; userns/idmapped boundary remains unqualified |
++| dup, fork, exec, SCM_RIGHTS | share/import existing file description | attenuation shared by aliases, not receiver path reauthorization | executed; no unexpected WRITE restoration; no retroactive revocation |
++| F_RESTRICTFD_CAP | new rights = old AND requested | atomic monotonic reduction | attempted wider mask, unknown-bit rejection, parallel reductions executed |
++| F_CLONEFD_CAP | derivation from pinned source, not ambient path reopen | requested AND source snapshot AND clone mode | independent attenuation; zero-right clone; source scope drop does not revoke an FD |
++| close/reuse | normal fdtable references | no rights stored in integer fd slot | reused scope handle denied, old alias remains zero, new independent open gets its own rights, clone/close race exercised |
++| mmap/mprotect | established FD plus independent LSM hooks | managed READ/WRITE ceiling at establishment | new shared WRITE/mprotect denied after restriction; pre-existing mappings not revoked |
++| XFS handles/fanotify/io_uring exceptional fresh opens | distinct Linux privilege and open paths | existing narrow status-aware ceilings | SOURCE-REVIEWED now; historical 21-case suite unavailable; not rerun in this checkpoint |
++| metadata/ioctl/anonymous storage | operation-dependent L/U | no invented semantic policy; managed generic ioctl fails closed | memfd/SysV remain outside pathname scope; metadata, special objects not generally qualified |
++
++## Lifetime and concurrency reasoning
++
++Authority state is immutable, credential-associated and refcounted. Scope copies
++pin paths; partial-copy cleanup counts only acquired scope entries. Final
++reference destruction is deferred to workqueue context because credential free
++can occur under RCU. Scope reduction allocates and checks a subset before
++credential commit; failures leave the old credential intact. Confinement entry
++rejects a multithreaded thread group. Later reduction replaces the **calling
++task's** credentials; it is not a synchronous process-wide revocation. The
++thread test explicitly observes the unchanged peer's original scope.
++
++File capability state is attached to a referenced `struct file`, not an fd
++number. First publication uses cmpxchg; losing allocators free their temporary
++state and AND the published bitmap. Subsequent reductions are atomic AND.
++Only final file destruction frees that state. Clone takes a source-rights
++snapshot: a clone that linearized before restriction may retain that earlier
++subset. Restriction is NOT revocation of independent prior clones, aliases to
++other descriptions, or established mappings. A clone started after restriction
++has returned must not restore rights; tests assert this separately from the
++concurrent overlap window. Clone error paths unwind the new file, bitmap, and
++unused allocations before fd_install. Current fcntl FD lookup pins the source
++for the operation; close/reuse cannot reinterpret an already pinned source.
++
++Stress bounds per qualification run: two restriction workers x 2,000 calls;
++two clone workers x 2,000 calls; 2,000 post-restriction clones; 4,000 clone vs
++4,000 close/dup2 cycles; 5,000 opens vs 5,000 symlink exchanges; 128 forked
++scope-construction/confine/reduction/destruction cycles. These are bounded
++experiments, not exhaustive scheduling or allocation-failure proof. A bounded
++EBUSY retry after pthread_join accounts for clear_child_tid preceding removal
++from the kernel thread group; an earlier strict-KCSAN run exposed this fixture
++race. EBUSY while a worker is live is still asserted separately. KASAN and
++lockdep runs have no observed diagnostic; strict KCSAN findings must be reviewed
++as reported in qualification-status.md, not suppressed because functional TAP
++assertions passed.
++
++## LSM and DAC review
++
++`inode_permission_path()` prechecks handled semantic operations, retains
++superblock/immutable/idmap constraints, reuses do_inode_permission(), and only
++substitutes for generic EACCES with no custom ->permission callback. devcgroup
++and security_inode_permission remain after the positive decision. Namespace
++paths retain path/inode LSM hooks before mutation. FD I/O retains
++security_file_permission; mmap retains its own LSM hooks. Clone uses
++security_inode_permission, dentry_open (including security_file_open), and
++security_file_post_open, and retains the source open credentials. SCM_RIGHTS
++retains security_file_receive and normal Unix-socket authorization.
++
++The focused Landlock case loads an enforcing empty READ ruleset and verifies
++that a semantic READ grant cannot reopen the pathname. The earlier assertion that a source-derived clone must also fail was
++reclassified as TEST_CONTRACT_ERROR by the [targeted audit](landlock-audit.md):
++preexisting bearer authority is not a fresh pathname grant. The corrected test
++checks readable READ-only derivation, denied WRITE and unchanged pathname
++denial. Landlock file_open selects its subject from file->f_cred; clone keeps
++the source's saved opener credentials, without changing the caller's domain.
++
++A separate regression did demonstrate loss of a cached TRUNCATE denial after
++an external rename and recomputation under those saved credentials. The new
++LSM file_clone hook rejects such optional-permission amplification before FD
++publication. Original source state and ordinary LSM hooks remain unchanged;
++no opener-credential rebase or opaque security-blob copy was introduced. Upstream Landlock tests are
++additional ordinary-Linux regression coverage, not an Authority/SELinux or
++Authority/AppArmor policy matrix. SELinux is compiled in the regular build but
++no policy is loaded. AppArmor is not enabled in those configurations. Neither
++is empirically qualified here; do not infer their correctness from hook
++presence. POSIX ACL allow cannot exceed the handled ceiling; non-owner FSUID
++and mode-000 substitution are tested. Supplementary groups, rich ACL denial/
++grant combinations, idmapped mounts and enforcing stacked policies still need
++separate fixtures.
+diff --git a/Documentation/authority/landlock-audit.md b/Documentation/authority/landlock-audit.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..fd76af95b26fd549ea9b0fc6ead216a4171d0f38
+--- /dev/null
++++ b/Documentation/authority/landlock-audit.md
+@@ -0,0 +1,123 @@
++# Targeted Authority / Landlock compatibility audit
++
++## Verdict and scope
++
++**COMPATIBLE_WITH_DOCUMENTED_LIMITATIONS after the cached-permission fix.**
++This is not a production qualification of Filesystem Authority v1. The original
++image had a real clone-specific Landlock permission-amplification defect, but
++it was **not** the READ behavior flagged by the previous qualification test.
++The complete evidence is `/tmp/authority-landlock-audit/REPORT.md`; preserve that
++directory durably before loss of temporary storage.
++
++Baseline is HEAD `e767a4ea70a3992c37ed604157d32f0dfbf9b1e3` plus the preserved
++worktree in `/tmp/authority-v1/source-final.tar` (SHA-256
++`710f021dd578b3e6da29e2677d851be1365877f95d4e4e107bc5a0265fa8d384`).
++No existing class, right, filesystem UAPI or selective/sealed transition changed.
++
++## The old failure was a test-contract error
++
++Linux/Landlock deliberately keep permissions associated with an already opened
++file. dup/F_DUPFD/fork/exec/SCM_RIGHTS retain that open file description and its
++security state. A fresh pathname or procfs reopen is different and is checked
++again. See Documentation/userspace-api/landlock.rst, “Rights associated with
++file descriptors”. Landlock does not register a file_permission hook to revoke
++READ/WRITE each time the current thread uses an older FD.
++
++F_CLONEFD_CAP is neither dup nor a fresh pathname acquisition. It derives an
++independent description from a pinned source path; its Authority bitmap is
++`source & request & destination_mode`. It retains source->f_cred, allocating a
++fresh LSM security blob and running normal inode/open/post-open hooks. This is
++intentional bearer derivation; it does not install the saved credentials in the
++caller or change the caller's Authority/Landlock domain.
++
++Therefore the old assertion “fresh path READ is denied, so cloning an existing
++pre-Landlock READ FD must also be denied” was **TEST_CONTRACT_ERROR**. Its
++corrected regression requires a readable READ-only clone, denied WRITE, and
++continued fresh-path denial. It passes on both the original and fixed kernel.
++The minimal reproducer contains no Authority-domain setup at all; the same
++behavior occurs with the Core unhandled.
++
++## The distinct implementation defect
++
++Landlock caches optional TRUNCATE/IOCTL_DEV access in each file's
++`landlock_file_security.allowed_access`. Clone used to recompute that state
++under saved opener credentials without comparing it to the source cache.
++
++The regression closes the fixture's pre-Landlock data FD, installs a policy
++allowing READ/WRITE in a and b but TRUNCATE only in b, then opens a/file.
++Source ftruncate is denied. A later layer denies all new data opens. An
++external helper (forked before Landlock, without a data FD) moves a/file into b.
++Source and dup still cannot truncate; a fresh open is denied. The old clone
++nevertheless acquired TRUNCATE and shortened the object to zero. Its READ/WRITE
++bitmap stayed 3, so an Authority-bitmap-only test would miss this defect.
++
++**IMPLEMENTATION_DEFECT:** losing a stored Landlock denial during capability
++derivation, not standard Linux non-retroactivity. The external helper supplies
++a namespace move, not a replacement FD or a new task policy grant.
++
++The focused fix adds a deny-only LSM `file_clone(source, destination)` check
++after existing open/post-open checks and before FD publication. Landlock
++rejects (`EACCES`) if recomputed optional rights exceed the source cache. It
++does not rebase credentials, copy opaque LSM blobs, modify cached audit masks,
++revoke old FDs, or weaken any existing hook. The clone is conservatively
++rejected rather than trying to manufacture partially intersected opaque LSM
++state. Rejection unwinds through the existing fput/bitmap cleanup path.
++
++## Differential results
++
++Counts are grouped kselftests, not individual syscalls. Raw `OBS` records retain
++return values and errno, source/clone rights, offset behavior and object size.
++
++| Configuration | Targeted groups PASS/FAIL/SKIP |
++|---|---:|
++| A: pristine HEAD, Landlock enabled, no custom API | 4/0/3 |
++| B-unhandled: fixed modified kernel, no task Authority domain | 6/0/1 |
++| C: fixed modified kernel, Authority domain enabled, CONFIG_SECURITY_LANDLOCK=n | 5/0/2 |
++| C-unhandled: same C image, no domain | 4/0/3 |
++| D before fix: Authority and Landlock enabled | 6/1/0 |
++| D after fix: Authority and Landlock enabled | 7/0/0 |
++
++**Requested fully Authority-disabled modified build B is BLOCKED:** no such
++Kconfig/runtime switch exists. B-unhandled leaves the credential domain absent,
++but the FD API is still compiled. It must not be called feature-off. No switch
++was invented for this audit. KUNIT=n also is not Authority-off.
++
++On the fixed regular and KASAN/lockdep images, complete executed userspace
++regressions each report **533 PASS / 0 FAIL / 14 SKIP**, including the original
++13, qualification 22, targeted 7, ramfs variant, four upstream openat2 suites,
++and upstream Landlock base/fs tests. Core checks separately pass **10/10** on
++both images. Static compat32 authority suites pass **42/0/0**. Skips are ramfs
++ACL (1), upstream overlayfs (3), hostfs (5), tracefs (5). No KASAN/lockdep warning
++was observed; strict KCSAN was not rerun in this focused audit.
++
++## Classification and limitations
++
++* **EXPECTED_LINUX_BEHAVIOR:** old FD/dup/SCM/fork/exec access persists; source
++  ftruncate and device ioctl keep their open-time Landlock properties; fresh
++  path/proc reopen can still fail; denied directory listing is not universal
++  traversal/metadata confinement.
++* **EXPECTED_AUTHORITY_BEHAVIOR:** independent clone offset and saved opener;
++  monotonic bit attenuation; managed regular-file ioctl fails EOPNOTSUPP;
++  device FD clone unsupported; changed UID/FSUID can use a delegated object
++  without gaining fresh path access. Foreign-source and foreign-clone
++  AT_EMPTY_PATH publication both retain Linux's ENOENT credential gate.
++* **TEST_CONTRACT_ERROR:** treating preexisting bearer READ as a fresh path
++  grant merely because clone allocates a new struct file.
++* **IMPLEMENTATION_DEFECT, fixed:** source optional-permission cache was not
++  a ceiling on recomputed clone state after a move. New regression verifies
++  EACCES and unchanged object size/source denial.
++* **POLICY_AMBIGUITY / UNQUALIFIED:** stronger process-wide FD revocation,
++  caller-credential rebasing, other LSMs' cached restrictions, enforcing
++  SELinux/AppArmor stacking, device cloning, and full feature-off comparison.
++  No such additional policy is silently chosen here. Clone can still fail
++  when ordinary LSM recomputation denies it; it is not promised dup's exact
++  success behavior across path/policy changes. Clone-guard rejection is not
++  integrated into a new Landlock audit-request type; kprobes observe it.
++
++Entry/return kprobes observe file_open, file_permission, file_post_open,
++file_truncate, the Landlock callbacks, and the new file_clone guard without
++replacing their decisions. The fixed moved-object case runs open/post-open,
++then file_clone returns -EACCES before publication. The source and clone have
++independent security blobs/lifetimes; old descriptions are not overwritten.
++The existing whole-kernel NO-GO and its unrelated regression/integration/
++concurrency blockers are not lifted by this targeted verdict.
+diff --git a/Documentation/authority/qualification-status.md b/Documentation/authority/qualification-status.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..2e70152a16b076aeaa0c3769fbe76d1b38a27fcb
+--- /dev/null
++++ b/Documentation/authority/qualification-status.md
+@@ -0,0 +1,972 @@
++# Qualification status, boundaries, and next work
++
++This status records what can be defended, not what the prototype hopes eventually to do. Four labels matter throughout:
++
++* **CURRENT SOURCE** — checked in the present worktree during this documentation task.
++* **HISTORICAL RUNTIME-REPORTED** — the previous isolated-QEMU run reported the result in the surviving conversation summary, but the original `/tmp` test sources/logs were lost after reboot. These results are not independently rerun in this documentation task.
++* **CURRENT RUNTIME-REPORTED** — a current isolated-QEMU run of the exact built image produced retained temporary logs and machine-readable markers; the harness/artifacts are not repository tests.
++* **SOURCE-REVIEWED** — source flow was inspected, but no corresponding runtime proof is retained.
++
++Do not silently upgrade historical or partial evidence into a universal claim. The original reports `/tmp/authority-cve-eval/report.md`, `/tmp/authority-dac-audit/report.md`, and `/tmp/authority-create-minting/report.md` are absent. The recovery notes live in `../authority-prototype/`.
++
++## 1. Qualification vocabulary
++
++| Label | Meaning |
++|---|---|
++| **QUALIFIED (bounded)** | Relevant path was exercised on the exact built kernel in an isolated runtime with synthetic fixtures. This covers only stated configurations/paths; it is not a proof for all filesystems or races. |
++| **PARTIALLY QUALIFIED** | Some important path variants were tested, but meaningful operations/configurations remain outside evidence. |
++| **SOURCE-REVIEWED** | Code path/order was inspected without matching runtime evidence. |
++| **UNQUALIFIED** | No defensible test/source basis for a behavior claim. |
++| **FAILED** | A stated intended invariant was tested and violated. Keep the negative result visible. |
++| **OUT_OF_MODEL** | Mechanism is outside the stated filesystem-authority trust boundary (e.g. arbitrary kernel compromise). |
++| **BLOCKED** | Meaningful qualification depends on an unavailable precondition, policy, filesystem, or safe test setup. |
++
++“Zero test failures” is a test result, not a security proof and not evidence for untested entry points.
++
++## 2. Current source inventory and explicit coverage limits
++
++`kernel/authority.c` and `include/linux/authority.h` hold credential-associated class state. The minimal internal Authority Core dispatches typed class-local requests and reports UNHANDLED, HANDLED+IMPLEMENTED, or HANDLED+UNIMPLEMENTED; filesystem authorization and regular-open DAC composition remain distributed mainly in `fs/namei.c`, with open/truncate logic in `fs/open.c`. File-description capability handling is in `fs/file_capability.c`, `fs/read_write.c`, `fs/open.c`, `fs/ioctl.c`, and `mm/mmap.c`. Control ABI remains the existing PoC `prctl` in `kernel/sys.c` / `include/uapi/linux/prctl.h`; FD ABI remains the existing PoC `fcntl` commands in `include/uapi/linux/fcntl.h`.
++
++**CURRENT SOURCE:** `PR_CAPAUTH_CONFINE` can mark only `CREATE_FILE`, `READ_FILE`, `WRITE_FILE`, `DELETE_FILE`, `RENAME`, and `LINK` as handled. `TRAVERSE` exists as an additive/path permission right but cannot be made mandatory by this ABI. DAC override itself is not a handled right; entry rejects the legacy global override. Thus do not state that current confinement covers every right in the enum or all pathname reachability.
++
++**CURRENT SOURCE:** `PR_CAPAUTH_ADD_FS_SCOPE` requires `CAP_SYS_ADMIN`; `AUTH_SYSTEM` also requires it. The PoC does not yet expose the general unprivileged launcher/broker API implied by the long-term use case. Any claimed deployment flow must account for a privileged authority-construction step.
++
++## 3. Runtime-reported qualification matrix
++
++The previous report recorded a full external Debian Trixie build (GCC 14.2.0, GNU ld 2.44) and booted the produced image only in isolated QEMU/KVM with synthetic fixtures. The final recorded `bzImage` SHA-256 was `c0694f3a9a7d70cff6676fb2adafe725e3a7872a67c0b6fe80e3870c7b56d569`; config SHA-256 was `5ab2b496a41786dd90a780c5a063aa93e785351484158d29d28b422f9decd3ea`. Build/runtime artifacts and logs were in `/tmp` and are no longer present. Hashes are historical identifiers, not proof the artifacts can be reproduced today.
++
++| Area | Status | Retained result / limit |
++|---|---|---|
++| Identity separate from authority | **HISTORICAL RUNTIME-REPORTED** | Early `AUTH_SYSTEM` proof reportedly retained ordinary user UID/GID and zero Linux capabilities while selected operations succeeded; created objects kept ordinary ownership. Broad mode is PoC scaffolding. Original harness lost. |
++| Variable-width rights | **PARTIALLY QUALIFIED** | Bit-80 sentinel was used to test storage/control parsing above 64 bits; not a general extensible multi-class ABI proof. Unknown set bits fail closed in current confine parser; zero extension bytes accepted. |
++| Object-backed scopes | **HISTORICAL RUNTIME-REPORTED** | Rename/replacement, symlink spelling, and bind-alias behaviors were tested in synthetic guests. Exact matrix/logs lost; unusual mounts/filesystems/races remain unqualified. Current source matches same mount+dentry ancestry for most rights and exact identity for DELETE/RENAME. |
++| `CREATE_FILE` separation | **HISTORICAL RUNTIME-REPORTED** | CREATE-only did not imply existing READ/WRITE, mkdir, delete, or rename in prior tests. This is not universal CREATE-path coverage. |
++| Bounded `TRAVERSE` | **PARTIALLY QUALIFIED** | Historical bounded BENEATH/IN_ROOT tests reportedly rejected `..`, symlink escape, wrong-parent, and alias cases. Current confine ABI cannot mark TRAVERSE mandatory; lookup fast paths / ambient path visibility are not a complete boundary. |
++| Existing-file READ/WRITE opens and DAC provider | **CURRENT RUNTIME-REPORTED; QUALIFIED (bounded)** | Exact integration image: 47 focused cases, zero failures. Includes mode/group and FSUID/FSGID, ACL and supplementary groups, DAC capabilities/mandatory ceiling, O_RDWR composition, O_TRUNC and path `truncate()`, path/proc reopen, hard-link/symlink/renamed-scope/bind aliases, mmap/mprotect FD ceilings, sendfile/splice/copy_file_range FD-capability checks, and CREATE/O_TMPFILE/LINK/DELETE/RENAME regressions. Generic DAC is reused, not duplicated. Callback filesystems, idmapped mounts, enforcing LSM, races, and alternate fresh-open paths remain unqualified; see §7. |
++| FD restriction/derivation | **PARTIALLY QUALIFIED** | GET/restrict/clone, subset behavior, dup family sharing, fork/exec, SCM_RIGHTS, read/write, truncate/fallocate, mmap/mprotect, and sendfile/splice/copy_file_range checks tested on supported simple regular-file filesystems. The file-capability code supports regular rootfs/ramfs/tmpfs inodes except `IS_ANON_FILE()` and path/backing FDs; this includes memfd shmem inodes, whose unscoped creation/data access remains outside path confinement. Existing mappings remain non-revocable. |
++| FD persistence after scope drop | **QUALIFIED (bounded)** | Retained tests showed established FD use persists after pathname scopes drop. This is an intentional bearer-capability property, not a bypass claim. Existing mappings/imported writable FDs are not revoked. |
++| Procfs reopen from attenuated FD | **FAILED for additive model; later bounded fix reported** | Initially a READ-only clone's direct write failed but a fresh `/proc/self/fd/N` O_WRONLY open succeeded through ambient DAC. Mandatory fresh-open checks later denied tested proc reopen cases. The additional same-UID `/proc/<pid>/fd/N` test passed the ptrace access precondition but was denied by the receiver's handled semantic scope. Other import/reopen routes remain. |
++| Mandatory confinement for handled rights | **QUALIFIED (bounded)** | Previous rootfs/tmpfs synthetic suites reported that UID DAC and `CAP_DAC_OVERRIDE` did not exceed handled READ/WRITE/CREATE/DELETE/RENAME scopes; positive semantic grants worked; unknown handled bits failed closed; fork/exec/setid/filecap transitions were exercised. Follow-up tests cover selected exceptional file-description routes only. Anonymous memfd/SysV shared-memory storage is explicitly outside this path-authority result. |
++| CREATE initial FD rights | **QUALIFIED (bounded)** | Final reported 4-way READ/WRITE mask matrix for named `O_CREAT`, `open/openat/openat2/creat`, `O_TMPFILE`, existing `O_CREAT`, `O_EXCL`, new/existing `O_TRUNC`, FD bits vs `F_GETFL`, descriptor persistence, restrictions, and read-only tmpfs. `CREATE_MINTING_FAILURES=0`. `dentry_create()` O_TRUNC access adjustment was source-reviewed, not runtime-tested. See [create report](../authority-prototype/create-file-authority.rst). |
++| DELETE | **PARTIALLY QUALIFIED** | Direct-child non-directory unlink API exercised; exact-parent and separation from data rights reported. `rmdir`, all unbounded/alternate delete callers, special filesystems and races are not complete. |
++| RENAME | **PARTIALLY QUALIFIED** | Isolated tests reported zero failures for direct-child regular files, exact both-parent semantics, flags zero, and existing FD behavior. The bounded capability API rejects directory/nonzero-flag cases; ordinary `renameat2` flows have separate parent-aware VFS checks but directory/exchange/nonzero flags were not runtime-qualified. Leases/delegations/race behavior is not complete. |
++| LINK / hardlink publication | **QUALIFIED (bounded)** | Exact destination-parent LINK check is in `vfs_link_path()` for ordinary `link()`/`linkat()` paths, including `AT_EMPTY_PATH`. Focused isolated QEMU suite reported `LINK_TEST_FAILURES=0`; details and known boundaries below. Context-free VFS link callers fail closed when LINK is handled. This is not full namespace confinement. |
++| rootfs / ramfs / tmpfs | **PARTIALLY QUALIFIED** | Basic create and tmpfile positive grants were reported on these simple filesystems; tmpfs additionally carried the broad CREATE/FD matrix. This does not imply arbitrary `->permission` callback qualification. |
++| Read-only filesystem / immutable / structural checks | **PARTIALLY QUALIFIED** | Current suite confirmed `EROFS` remains for a write open on a read-only mount with semantic WRITE; earlier CREATE evidence is historical. Immutable/append-only rules are source-reviewed, not exercised in this integration run. Not every structural restriction/path tested. |
++| ACL / idmapped mounts | **PARTIALLY QUALIFIED / UNQUALIFIED** | POSIX ACL allow/deny and mandatory-ceiling fixtures ran on the tested tmpfs setup. Idmapped mounts and broader ACL/filesystem combinations remain unqualified. |
++| NFS, FUSE, overlayfs, other callback filesystems | **UNQUALIFIED** | Filesystem-specific callback behavior was not qualified. Keep callback denials fail-closed. |
++| Enforcing LSM | **BLOCKED / UNQUALIFIED** | No enforcing-LSM policy was loaded for runtime qualification. Source hooks remain independent, but interaction is not established empirically. |
++| Historical CVEs | **SOURCE-REVIEWED, not exploit-reproduced** | Records/advisories/upstream fixes were reportedly compared; no vulnerable kernel/exploit was run. Original per-CVE evidence was lost; see the recovery report. |
++
++The historical full CREATE/confinement/FD/DELETE/RENAME harnesses remain unavailable and were not restored as full suites. The current integration harness reconstructs bounded regression subsets and labels them separately; this does not upgrade the old historical results or establish complete-prototype regression coverage.
++
++## 4. LINK: historical gap, current bounded mediation
++
++**Historical result:** a confined process created an `O_TMPFILE` with valid rights, then successfully called `linkat(..., AT_EMPTY_PATH)` into a different parent outside its CREATE scope. A fresh write-open at the published name was denied by handled WRITE scope; the original tmpfile FD retained bearer write authority. This established a namespace-insertion gap, not a data-write failure.
++
++**Current source change:** `FS_LINK` is right ID 7. It may be marked handled; handled LINK is required at the exact destination mount+dentry parent in `filename_linkat()` → `vfs_link_path()` → `may_create_dentry_common()` / `inode_permission_path()`. Missing authority is denied before generic DAC can grant; the operation-aware semantic grant may satisfy generic DAC `-EACCES` when no filesystem-specific `->permission` callback intervenes. Existing `security_path_link()`, `security_inode_link()`, source eligibility, mount/superblock, immutable, link-count, delegation, filesystem, and LSM rules remain in force.
++
++**Current runtime-reported bounded evidence:** `/tmp/authority-link/link-test.c` was run against the exact built QEMU image. It reported `LINK_TEST_FAILURES=0` and `LINK_TEST_EXIT=0`. Cases included: missing/right/wrong/ancestor scope; exact-parent success; rename-following parent scope and old-path replacement rejection; bind-mount alias denial; UID 0/CAP_DAC_OVERRIDE denial; generic-DAC-denied destination positive grant as UID 1000; unconfined compatibility; CREATE/DELETE/RENAME and READ/WRITE separation; LINK not granting fresh CREATE/READ/WRITE/DELETE/RENAME; ordinary `link()`, `AT_SYMLINK_FOLLOW`, O_TMPFILE `AT_EMPTY_PATH`; READ, WRITE, RDWR, O_PATH and zero-right cloned source FDs; dup and same-credential SCM_RIGHTS; protected-hardlink denial; broker FD open-credential rejection; `EEXIST`, directory hardlink rejection, `EXDEV`, `EROFS`; scope drop, failed post-confinement widening, and fork/exec inheritance. The test suite is temporary under `/tmp`, not checked into this repository.
++
++**Model selected:** exact destination LINK plus an ordinarily valid source route. Pathname sources still use normal lookup and `may_linkat()`; `AT_EMPTY_PATH` uses the established FD path but retains Linux's `f_cred` / `CAP_DAC_READ_SEARCH` guard. There is no separate semantic source LINK scope and no READ/WRITE data right is required merely to create the name. Different-credential broker-provided anonymous FDs therefore cannot generally be published by an unprivileged receiver through `AT_EMPTY_PATH`; SCM_RIGHTS does not bypass that normal kernel restriction. The broker can perform the link, or another ordinary source route must be available.
++
++The historical gap is closed **when LINK is handled**. A control case confirmed that LINK left unhandled remains ordinary VFS/DAC behavior, so a confined domain that does not select LINK is not protected from namespace publication. This is opt-in bounded mediation, not complete confinement.
++
++### Source-audited syscall/VFS flow
++
++```text
++link() ─┐
++        ├─> filename_linkat()
++linkat()┘      ├─ filename_lookup(source, flags)
++               │   ├─ AT_SYMLINK_FOLLOW -> LOOKUP_FOLLOW
++               │   └─ AT_EMPTY_PATH -> LOOKUP_LINKAT_EMPTY + fd f_cred/CAP_DAC_READ_SEARCH gate
++               ├─ filename_create(destination) -> pinned new_parent path + locked child dentry
++               ├─ same-mount check -> -EXDEV
++               ├─ may_linkat(idmap(new_parent.mnt), source)
++               ├─ security_path_link(source, new_parent, target)
++               └─ vfs_link_path(source, new_parent, target)
++                   └─ __vfs_link()
++                       ├─ may_create_dentry_common(..., new_parent, FS_LINK)
++                       │   └─ inode_permission_path(MAY_WRITE|MAY_EXEC, exact parent, LINK)
++                       ├─ same-superblock check
++                       ├─ append-only/immutable/unmapped-ID/filesystem-op/directory checks
++                       ├─ security_inode_link()
++                       ├─ source inode lock; nlink-zero/I_LINKABLE and max-link checks
++                       ├─ directory/source delegation breaks
++                       └─ filesystem ->link() -> fsnotify_link()
++```
++
++`may_linkat()` first validates source uid/gid mapping. If `fs.protected_hardlinks` is enabled, it accepts source ownership/`CAP_FOWNER` or `safe_hardlink_source()`: regular file, not setuid, not executable setgid, and generic READ|WRITE permission. The check is not replaced by LINK and is source-reviewed plus runtime-tested for a protected negative case. The idmap comes from the destination mount after `filename_linkat()` has required the same mount.
++
++`security_path_link()` remains before the VFS helper; `security_inode_link()` remains inside it before filesystem mutation. The semantic fallback is limited to generic DAC `-EACCES` with no custom `i_op->permission`; callback decisions, read-only mount `-EROFS`, immutable/unmapped-ID constraints, devcgroup, LSM, filesystem `->link`, link limits, and lease/delegation rules are not bypassed. `filename_create()` takes mount write access and the parent directory lock before the path-aware semantic check; the checked path is the pinned parent object, not a re-resolved string.
++
++The standard userspace path is path-aware. `filename_linkat()` performs source lookup, the same-mount check, and `may_linkat()` before calling `vfs_link_path()` with the pinned destination parent. That helper carries destination identity but does not itself repeat source eligibility; its only audited current caller is `filename_linkat()`, and any future direct caller must provide equivalent source/mount checks. Existing kernel callers of context-free `vfs_link()` cannot provide mount+dentry destination identity; when LINK is handled they return `-EACCES` rather than falling through. This is deliberately fail-closed, but those callers and overlay/callback stacks were not runtime-qualified. No enforcing LSM policy was loaded.
++
++## 5. Other out-of-model, unmodeled, or unqualified areas
++
++These categories should not be conflated:
++
++### Not currently represented as semantic rights / operations
++
++mkdir, rmdir, symlink creation, mknod, chmod/chown, xattrs, timestamps and other metadata mutation, EXEC authority, broad directory listing/visibility, generic ioctl semantics, full io_uring/async operation classification, and hard-link callers outside the audited `filename_linkat()` context-aware path. Some remain protected by ordinary VFS/DAC/LSM rules; “unmodeled” does not mean “known exploitable.”
++
++### Known partial implementation boundaries
++
++* Mandatory confinement cannot select TRAVERSE in the current ABI.
++* The direct `PR_CAPAUTH_RENAMEAT2` capability API only accepts regular files and flags zero. Ordinary VFS `renameat2` has parent-aware integration, but directory/exchange/nonzero-flag cases are not qualified.
++* `FS_DELETE_FILE` is a direct non-directory-entry model, not `rmdir`.
++* Namespace positive grant paths and lower context-free helpers do not all share one operation-aware decision core; CREATE over DAC denial is not uniform for every internal route.
++* LINK only covers the ordinary `filename_linkat()` syscall path with parent context. Context-free `vfs_link()` callers are fail-closed when LINK is handled; overlayfs and other callback integrations were not runtime-qualified.
++* File capabilities cover only a narrow regular-file/filesystem set. Managed rights do not revoke already-created VMAs.
++* Legacy `AUTH_SYSTEM` and global DAC override are regression scaffolding, not desired production authority.
++
++### Unqualified integrations
++
++POSIX ACL behavior beyond the focused allow/deny fixture, idmapped mounts, enforcing LSM policy, NFS/FUSE/overlayfs and other custom permission callbacks, complete mount topology/bind behavior, special/anonymous objects, delegation/lease interactions, rename/unlink race stress, all file-description operations, and all equivalent syscall/kernel entry paths.
++
++### OUT_OF_MODEL
++
++Arbitrary kernel compromise (including memory corruption that permits kernel code/data modification), malicious modules, and hardware compromise. Historical kernel-memory-corruption CVEs were classified outside filesystem authority, not contained by it.
++
++## 6. Historical CVE record and certainty
++
++The retained context supplied these approximate historical labels; individual advisory/source evidence is unavailable after loss of `/tmp`, so none is independently revalidated in this document:
++
++| Historical example | Retained label | Limitation |
++|---|---|---|
++| CVE-2021-41773 (Apache traversal) | UNAFFECTED as shipped; bounded reconstruction denied traversal | Unmodified Apache was not forced through that interface. |
++| CVE-2023-22809 (sudoedit) | UNAFFECTED | No vulnerable software/exploit run. |
++| CVE-2021-3156 (sudo) | UNAFFECTED | Same. |
++| CVE-2021-4034 (PwnKit) | UNAFFECTED | Same. |
++| CVE-2019-5736 (runc / proc exe) | UNAFFECTED | Same. |
++| CVE-2022-0847 (Dirty Pipe) | UNAFFECTED / data-integrity gap | Kernel data-integrity bug is not fixed by path authority. |
++| CVE-2016-5195 (Dirty COW) | UNAFFECTED / data-integrity gap | Kernel data-integrity bug is not fixed by path authority. |
++| CVE-2022-0185 (filesystem-context memory corruption) | OUT_OF_MODEL | Kernel memory-corruption trust boundary. |
++| CVE-2021-22555 (netfilter memory corruption) | OUT_OF_MODEL | Kernel memory-corruption trust boundary. |
++| CVE-2018-1002105 (Kubernetes API authorization) | OUT_OF_MODEL | Not this filesystem authority boundary. |
++
++No historical exploit was executed and no vulnerable kernel was booted. The table is a recovery of supplied summary context, **not an evidence-backed CVE assessment**. Restore the source/advisory matrix before using these labels for security review or publication.
++
++## 7. Source-reviewed findings versus runtime evidence
++
++### SOURCE-REVIEWED in the present worktree
++
++* `kernel/authority.c`: dynamic bitmaps, scope pinning/matching, exact DELETE/RENAME/LINK matching, confined flag, subset/reduction, test-right sentinel.
++* `kernel/sys.c:prctl_capauth_confine()`: single-thread check, allowed handled-bit list, DAC override rejection, commit, `no_new_privs`.
++* `fs/namei.c:inode_permission_path()`: semantic precheck, superblock/immutable/idmap/callback/generic-DAC ordering, fallback limited to generic `-EACCES`, devcgroup/LSM afterward.
++* `fs/namei.c:may_o_create()`, `vfs_tmpfile()`, `dentry_create()`: separate creation routes and pre-instantiation initial access checks.
++* `fs/namei.c:filename_linkat()`, `may_linkat()`, `vfs_link_path()`, `__vfs_link()`: source lookup/eligibility, destination exact-parent LINK, path/inode LSM hooks, filesystem link callback, link-count and delegation ordering.
++* `fs/file_capability.c`: simple-filesystem allowlist, rights subset, clone via pinned path, file mode intersection, LSM checks.
++* Read/write/truncate/fallocate/ioctl/mmap integration sites exist, but existence of a hook is not universal operation coverage.
++* `fs/xfs/xfs_handle.c:xfs_open_by_handle()` is an exceptional fresh-description path without `may_open()`; its handled READ/WRITE ceiling is source-reviewed and runtime-qualified on XFS v5 in the follow-up checkpoint below. Generic `open_by_handle_at()` also passed focused XFS READ/WRITE scope tests.
++
++### READ/WRITE DAC-provider integration checkpoint
++
++**CURRENT SOURCE:** `fs/namei.c` carries a path/object/idmap/subject READ/WRITE request for existing regular-file opens and calls the existing `do_inode_permission()` / `generic_permission()` provider. Only generic `-EACCES` can be replaced by a semantic positive grant; a handled right remains a mandatory ceiling. Filesystem `i_op->permission` callbacks stay on their original fail-closed path. `vfs_truncate()` now uses the path-aware WRITE decision even when WRITE is not handled; this addresses the earlier direct-truncate gap. `ftruncate()` and established-FD I/O remain FD-capability paths. Managed-FD mmap separately enforces FD capabilities; a WRITE-less managed FD cannot create a new shared-writable mapping or regain `VM_MAYWRITE` through `mprotect()`.
++
++**CURRENT RUNTIME-REPORTED:** a clean external build in `/tmp/authority-dac-integration/build` (Debian Trixie, Linux `7.3.0-rc5`, GCC 14.2.0, GNU ld 2.44) produced the exact image booted under isolated QEMU/KVM. The final harness reported `DAC_INTEGRATION_CASES=47`, `DAC_INTEGRATION_FAILURES=0`, `DAC_INTEGRATION_EXIT=0`, then normal power down. It also reported CREATE subset 3/0, LINK subset 4/0, DELETE subset 2/0, RENAME subset 2/0, focused confinement 34/0, FD capability 6/0, and aggregate DAC-provider failures 0. Cases include mode/group, FSUID/FSGID, ACL and supplementary groups, DAC-capability ceilings, O_RDWR, O_TRUNC, explicit `truncate(path)` WRITE grant and mandatory denial, ftruncate distinction, path/proc reopen, hard-link/symlink/renamed-scope/bind aliases, CREATE/O_TMPFILE/LINK/DELETE/RENAME regressions, EROFS, shared mmap/mprotect attenuation, fallocate, FD attenuation/delegation, and FD-capability-gated `sendfile`, `splice`, and `copy_file_range`.
++
++Exact integration evidence: `bzImage` SHA-256 `38df41ec4d909994109a6dc8f8154e6e42c9fdd65ab4109265bed9b24a1e6f79`; config SHA-256 `d6fe1c4979b1d630b9212cfe11a36231de7117f8cd55e49af19c8ac18e5044c2`; rootfs cpio SHA-256 `0df3b2dbf1faa60e8277f760d16055cdd5ce8723eef87a762edcaa98f34a52e1`; harness source SHA-256 `781330755e37a9a355ae9c6a0c8182ac7d87ddc250a61b27f4d3d39ab6ff57c8`; static test binary SHA-256 `18852b4f13c7fc675cef6eaef0cea57470ff6aa0a45d374120601eee99177ba9`. The FD-path test included a `F_SETFL(O_RDWR|O_APPEND)` attempt followed by a denied READ operation, confirming attenuation was not restored. XFS was configured as a module and compiled; the guest suite did not load XFS or exercise `open_by_handle`.
++
++The source audit found ordinary `open/openat/openat2`, io_uring openat/openat2, and procfs FD reopen converge on the normal open path. `rw_verify_area()` checks LSM file permission and managed FD READ/WRITE rights; representative FD I/O and mmap tests remain bounded to the existing integration harness. `F_SETFL` cannot change `f_mode`/`O_ACCMODE` or restore an attenuated FD right. XFS `open_by_handle` bypasses `may_open()` and generic DAC, but checks the handled semantic READ/WRITE ceiling and retains `CAP_SYS_ADMIN`; generic `open_by_handle_at()` uses handle resolution and then VFS open checks. Both were runtime-tested on a synthetic XFS v5 fixture in the follow-up. Fanotify event-FD creation bypassed `may_open()` and was found to deliver a readable FD despite a denied fresh open; `create_fd()` now checks the handled regular-file ceiling, and the retest returned `-EACCES` in `FAN_REPORT_FD_ERROR`. Overlayfs `ovl_permission()` remains a custom callback whose failures are not overridden. Callback filesystems remain unqualified.
++
++**Narrow provider verdict:** bounded support for generic-permission regular-file opens plus path-based `truncate()` is justified. It is not a universal DAC compatibility architecture or universal fresh-open authority decision core. Do not extend the provider boundary based on these runs. Callback filesystems (including overlayfs/FUSE/NFS), idmapped mounts, enforcing LSM policy, races, broader filesystems, immutable/append-only behavior, and complete historical CREATE/confinement/FD/DELETE/RENAME suites remain unqualified. The capability-establishment follow-up below qualified only named exceptional routes. Evidence, logs, and harnesses are temporary under `/tmp`, not repository tests.
++
++### Capability-establishment follow-up (CURRENT RUNTIME-REPORTED; bounded)
++
++The exact updated source was clean-built externally in `/tmp/authority-capability-establishment/build` (Debian Trixie, Linux `7.3.0-rc5`) with `CONFIG_FANOTIFY=y`, `CONFIG_XFS_FS=y`, and `CONFIG_IO_URING=y`, then booted only in isolated QEMU/KVM. The focused harness reported `CAP_ESTABLISH_TEST_CASES=21`, `CAP_ESTABLISH_TEST_FAILURES=0`, `CAP_ESTABLISH_TEST_EXIT=0`. Breakdown: six pidfd/procfs/O_PATH cases, three fanotify cases (denial, scoped grant, and ordinary-open control), three io_uring cases, one anonymous-storage classification case, and eight handle-open cases. It powered down normally. A second boot of the same exact kernel with the existing integration initramfs again reported `DAC_INTEGRATION_CASES=47`, zero integration/provider failures, and zero failures in the reconstructed CREATE/LINK/DELETE/RENAME/confinement/FD subsets.
++
++* `pidfd_getfd()` passed ptrace-style access for same-UID dumpable processes and imported the exact source `struct file`: unrestricted READ|WRITE remained usable despite the receiver's denied path open; READ-only and zero-right source attenuations remained intact. This is bearer-capability import, not a receiver path grant. The paired `/proc/<pid>/fd/N` reopen passed its ptrace precondition but failed the fresh open with `EACCES`. An `O_PATH` descriptor was acquired without data access; reopening it for READ was denied by the handled ceiling.
++* Fanotify prepatch falsification: a normal path open was denied, but a privileged fanotify group still delivered a readable regular-file event FD. `fs/notify/fanotify/fanotify_user.c:create_fd()` now checks the handled READ/WRITE ceiling for regular files before `dentry_open_nonotify()`; the postpatch `FAN_REPORT_FD_ERROR` test observed `-EACCES`. This check does not use or extend the generic DAC provider.
++* io_uring `OPENAT` shared ordinary path authorization. Fixed-file registration and `IORING_REGISTER_FILES_UPDATE` retained a later restriction of the referenced file; neither operation restored WRITE.
++* XFS was formatted as a v5 filesystem with features compatible with the test kernel. Both XFS `XFS_IOC_OPEN_BY_HANDLE` and generic `open_by_handle_at()` passed scoped READ/WRITE cases and denied missing handled READ/WRITE, eight cases total. The XFS ioctl retains `CAP_SYS_ADMIN`; generic handle-open retains its Linux handle/capability checks. No idmapped, callback, enforcing-LSM, or race qualification follows from this fixture.
++* `memfd_create()` under handled READ|WRITE and with no filesystem scope succeeded; `ftruncate`, write, and shared writable mapping succeeded, and `F_GETFD_CAP` reported `0x3`. SysV shared-memory write also succeeded. These are anonymous/in-memory storage routes outside the current path-based filesystem authority contract; the result is an explicit limitation, not a successful filesystem-scope test or a claim that they should inherit path scopes. Any broader confinement design needs a separate policy decision for them.
++
++The updated image SHA-256 is recorded in `/tmp/authority-capability-establishment/report.md`; the updated exact-image runtime logs are `qemu-final.log` and `dac-regression-final.log`. The source, image, config, test binary, initramfs, and XFS image hashes are retained in that report.
++
++### Authority Core follow-up (CURRENT SOURCE; CURRENT RUNTIME-REPORTED, bounded)
++
++**CURRENT SOURCE:** Every authority class stores its positive rights, handled-operation bitmap, and mode. Selective mode claims only marked operations; sealed mode claims the whole class. `authority_request_check()` has three distinct classifications: UNHANDLED returns success plus an explicit state so the caller retains legacy behavior; HANDLED+IMPLEMENTED invokes the class evaluator; HANDLED+UNIMPLEMENTED returns `-EOPNOTSUPP` without falling through. Unknown operations in a sealed class are handled-but-unimplemented. Filesystem operation IDs are internal and distinct from semantic-right names; existing filesystem UAPI bitmap positions and control structures were not changed in this phase. `FS_DAC_OVERRIDE` remains a grant, not an operation.
++
++The production registry still contains only the filesystem class, in selective mode. The current confinement UAPI cannot seal a class or claim arbitrary operations; its accepted handled operations and all existing scope/DAC semantics remain unchanged. Filesystem scopes continue to use pinned mount+dentry paths. The generic request context is a tagged union, and class operations have separate evaluation and state clone/destroy hooks; future classes can add typed contexts/state without requiring path scopes. This is a small static core, not a dynamic plugin system or universal VFS decision service. An absent class remains UNHANDLED for compatibility and lies outside this opt-in domain. No process, anonymous-storage, IPC, or network class or policy was added.
++
++Class handled/mode state is immutable under current post-confinement reduction operations. Rights and scopes can be dropped, but handled bits cannot be cleared and sealed mode cannot be opened. `authority_is_subset()` checks that reductions retain prior handled/sealed policy; `authority_cred_clear()` preserves confined state. Fork/credential duplication retains the same immutable object by reference, and exec clearing remains a no-op for a confined object. The KUnit lifecycle cases use reference duplication/clear helpers; they do not simulate a real exec transition for the synthetic test class.
++
++**CURRENT RUNTIME-REPORTED:** a clean external Debian Trixie build in `/tmp/authority-core/build` used `CONFIG_KUNIT=y`, `CONFIG_FANOTIFY=y`, `CONFIG_XFS_FS=y`, `CONFIG_IO_URING=y`, and `CONFIG_VIRTIO_BLK=y`. Its Authority Core KUnit suite ran on boot and reported `AUTH_CORE_TEST_CASES=10`, `AUTH_CORE_TEST_FAILURES=0`, `AUTH_CORE_TEST_EXIT=0`; KTAP reported `authority-core` pass. Cases cover unhandled legacy-continuation classification, absent-class compatibility, handled implemented evaluation, handled-but-unimplemented denial, unknown sealed denial, selective unhandled versus explicitly handled-unimplemented, monotonic sealed-state retention, reference inheritance, and irreversible `authority_cred_clear()` behavior. The synthetic class is compiled only with KUnit; this is not a userspace test API.
++
++The exact same image then booted the existing capability-establishment initramfs and reported 21 cases / 0 failures / exit 0, including exceptional fresh-open routes and anonymous-storage boundary classification. A second boot with the existing DAC integration initramfs reported 47 cases / 0 failures / exit 0, provider failures 0, and reconstructed CREATE/LINK/DELETE/RENAME/confinement/FD subsets with zero failures. Both guests powered down normally. These regressions support preservation of the existing filesystem model and ordinary unhandled paths within tested cases; they are not proof of every unhandled syscall retaining legacy behavior or of complete mediation.
++
++Exact current artifacts:
++
++* `bzImage` SHA-256: `eee9a8a4b6cd1f023ff024f4cda23bf6f7a945c4cdbca343379e05f3382cd9c3`
++* `.config` SHA-256: `595b9557be96097ca8c6fd61b04e1418e3f65c3e40dcba92d47dd758266cd484`
++* capability initramfs SHA-256: `0c3f9a552ad0da8554c16185a3e5eeffac4addb43c52080a7c79b6c58c963e9f`
++* DAC integration initramfs SHA-256: `0df3b2dbf1faa60e8277f760d16055cdd5ce8723eef87a762edcaa98f34a52e1`
++
++Full build and QEMU logs, the exact kernel config/image, and test sources/fixtures remain under `/tmp/authority-core/` and the referenced prior evidence directories. No new filesystem UAPI was added; no host deployment or boot modification occurred.
++
++### Checked-in authority kselftest (CURRENT RUNTIME-REPORTED; bounded)
++
++`tools/testing/selftests/authority/` now contains a kselftest target with 13 focused cases. In a clean external Debian Trixie build from a staging copy of the current worktree (`CONFIG_KUNIT=y`), the exact image booted only in isolated QEMU/KVM. The Authority Core KUnit suite reported 10 cases / 0 failures; the userspace suite reported 13 pass / 0 fail / 0 skip and `AUTHORITY_SELFTEST_EXIT=0`.
++
++The userspace cases cover unhandled WRITE continuing through root DAC; handled READ as a mandatory ceiling; a scoped READ grant after dropping UID; CREATE not minting initial WRITE; separate CREATE and WRITE scopes; path `truncate()` as fresh WRITE; established writable-FD use after dropping a scope right; exact-parent DELETE; both-parent RENAME; FD WRITE attenuation while READ remains; and fork/exec confinement inheritance. Fixtures use a synthetic tmpfs root. Cases whose evidence specifically depends on root DAC are skipped without root; scope tests may skip without `CAP_SYS_ADMIN`/setuid preconditions.
++
++Exact temporary evidence is under `/tmp/authority-selftest/`: `qemu-final.log`, kernel image SHA-256 `0c4646bbc8718576a6ed5abf4347e83792c148d25f6b11f0af1fb2d3e4534b82`, config SHA-256 `fa495a4979250a782867079cf5a3dda566112f97d732f2e955a2e02a3e1fc13a`, rootfs SHA-256 `b1f3ef1242d698671653dd6d096ad5031249a96f6df2261a8d0912532679d515`, test binary SHA-256 `d82053a57c525dd1780bebe33cc707566c6cb3590c12849bdeeda1e707638977`; checked-in test source SHA-256 `8faef187b28985f48e6772d73dd3ca397f76d62b4a0848f37fd738b03a97ba73`. This is a focused checked-in regression suite, not restoration of the historical full suites and not qualification of callback filesystems, idmapped mounts, enforcing LSM, races, or universal mediation.
++
++## 8. Next investigations, in order
++
++1. **Complete LINK integration qualification.** Audit/contextualize callback and kernel-internal `vfs_link()` callers; qualify `AT_EMPTY_PATH`/SCM_RIGHTS with realistic credentials, source protection, mount/idmap, immutable, leases/delegations, and races. Do not relax Linux's FD credential gate without a separately justified source-authority design.
++2. **Close semantic-vocabulary/mandatory gaps.** Decide whether TRAVERSE should be mandatory and, if so, qualify all lookup fast paths and bounded entry APIs. Inventory mkdir/rmdir/symlink/mknod/listing/metadata/exec and decide explicitly: model, preserve DAC, or deny under confinement.
++3. **Capability-establishment inventory.** Trace every path that creates, imports, clones, maps, or otherwise establishes authority: open variants, O_TMPFILE, procfs, hard links, `SCM_RIGHTS`, fork/exec, `io_uring`/async, kernel-internal opens. Distinguish new establishment from retained authority.
++4. **FD and mapping matrix.** Test pre-existing, inherited, cross-process imported, cloned, restricted, shared-mapped, and proc-reopened descriptors under confinement. Record which access persists and why; do not assume retroactive revocation.
++5. **Integration matrix.** Qualify ACLs, idmapped mounts, callback filesystems (begin with NFS/FUSE/overlay only in isolated fixtures), enforcing LSM, read-only mounts, immutable/append-only, sticky bits, bind mounts, leases/delegations, and race stress.
++6. **Restore reproducible test assets.** Check a synthetic harness and QEMU scripts into an appropriate test area or archive them durably with exact kernel config/build/image hashes and expected markers. The old harnesses were only in `/tmp`; this is a project-memory failure.
++7. **Before extending DAC-provider composition, restore broad regressions and close the bounded qualification gaps.** Reconstruct/rerun the historical CREATE/confinement/FD/DELETE/RENAME suites and test callback/idmapped/LSM boundaries. Only then consider a separate TRAVERSE experiment; it has distinct lookup context and fast paths and cannot currently be marked mandatory. Do not infer provider generality from the regular-open result.
++
++## 9. Build and operational safety record
++
++For the LINK phase, an external Debian Trixie build with GCC 14.2.0/GNU ld 2.44 produced the image hashed `96906e1d135a12c36baff4511032a4f4c55c36ce697ba6faf76b15fa0ba305dd`; the exact QEMU run reported `LINK_TEST_FAILURES=0`, `LINK_TEST_EXIT=0`, and powered off. Evidence is temporary under `/tmp/authority-link/`.
++
++For the READ/WRITE DAC integration checkpoint, a clean external Debian Trixie build produced `bzImage` SHA-256 `38df41ec4d909994109a6dc8f8154e6e42c9fdd65ab4109265bed9b24a1e6f79`, config SHA-256 `d6fe1c4979b1d630b9212cfe11a36231de7117f8cd55e49af19c8ac18e5044c2`, and rootfs cpio SHA-256 `f35048f9219cb6967443a7f57c524555093910659bf0e8c11099d92b14a128c4`. The exact image booted only in isolated QEMU/KVM: 47 integration cases, zero failures, normal power down; reconstructed regression subsets were CREATE 3, LINK 4, DELETE 2, RENAME 2, focused confinement 34, FD capabilities 6, each zero failures. The harness source hash is `1388ff344958703e5d9da26a89561f2f6de7f3953ac2dc1e768eb88a8bef969f`; authoritative artifact hashes and logs are in `/tmp/authority-dac-integration/`. Thirteen `.ko` modules were built including XFS (`CONFIG_XFS_FS=m`); XFS was not runtime-loaded. SELinux was configured, but no enforcing policy was loaded. This is not a rerun of the unavailable complete historical suites. No host deployment, boot modification, reboot, commit, or remote operation occurred.
++
++No host deployment, `/boot` or bootloader change, host reboot, commit, push, fetch, or remote operation occurred. The pre-existing worktree modifications remain. Verify current `git status` before making any later operational claim.
++
++## 10. Filesystem Authority v1 qualification attempt — NO-GO (2026-10-16)
++
++This checkpoint supersedes the availability/currentness claims of earlier
++checkpoints above: the historical `/tmp` evidence is **absent** in this session.
++The old 21-case capability and 47-case DAC harnesses cannot be rerun and are
++BLOCKED, not passing. The surviving 13-case repository suite was actually
++rebuilt and rerun. No new Authority class, right, UAPI layout, or sealed/selective
++transition was introduced. The operation-by-operation review and security
++invariants are in [filesystem-v1-matrix.md](filesystem-v1-matrix.md).
++
++### Baseline, focused correction and remaining negative finding
++
++Baseline HEAD is `e767a4ea70a3992c37ed604157d32f0dfbf9b1e3`, branch `master`,
++with the substantial pre-existing uncommitted prototype and documentation.
++`/tmp/authority-v1/baseline-status`, `baseline.patch`, `baseline-untracked.tar`
++and `source-baseline.tar` were captured before changes. The final preservation
++comparison records changed/new files only; unrelated baseline content and
++symlink targets are unchanged. There was no reset/clean/stash/commit or remote
++operation. Builds used a separate complete staging tree, never host deployment.
++
++**Resolved compatibility defect:** `may_open_created_access()` required data
++scopes for every confined creation even when READ/WRITE were UNHANDLED.
++On the unmodified baseline, the original suite passed 13/13, Core passed 10/10,
++but new tests reproduced EACCES for unhandled named O_CREAT and O_TMPFILE
++(17 pass / 2 fail in the corrected 19-case baseline fixture). The focused fix
++requires an initial READ/WRITE scope only for a handled data operation.
++Handled CREATE-only still cannot mint a missing handled WRITE capability;
++its failed-create test still verifies that no name was left behind. No
++independent VFS/LSM check was removed. W=1 also found seven kernel-doc warnings
++from the pre-existing internal unlink/link/rename helpers; their descriptions
++and optional path parameters were corrected. The focused W=1 rebuild is clean.
++
++**Unresolved LSM derivation finding:** a semantic READ grant plus an enforcing
++empty Landlock READ ruleset denies a fresh pathname open, but F_CLONEFD_CAP of
++a pre-Landlock source returns a READ-only description and successfully reads
++`d` from the fixture. This is reproduced on tmpfs, ramfs, KASAN, KCSAN and
++compat32. The new negative test expects the independent denial and deliberately
++remains **FAIL**, not XFAIL/SKIP. Landlock file_open uses `file->f_cred`, and
++clone currently reinstantiates with the source's saved credentials. The source
++FD already retains bearer READ; this is not proof of data-right amplification,
++but it fails qualification of the independent-LSM/new-description boundary.
++Changing to caller credentials also changes hard-link AT_EMPTY_PATH credential
++guards, LSM caching/auditing and broker derivation semantics. That policy must
++be explicitly resolved before a focused fix is chosen; no silent contract
++change or new authority class is made here.
++
++### Exact executed results (final sources)
++
++Counts below are kselftest **cases/groups**, not individual assertions, and are
++per configuration, not independent discoveries to add together. Core's ten
++checks are reported separately from userspace. All final guests completed and
++powered off; the runner correctly returned failure for the retained negative
++tests and for KCSAN diagnostics.
++
++| Suite | Regular PASS/FAIL/SKIP | KASAN+lockdep | strict KCSAN, KUNIT=n |
++|---|---:|---:|---:|
++| Authority Core internal checks | 10/0/0 | 10/0/0 | not compiled |
++| Original authority_test | 13/0/0 | 13/0/0 | 13/0/0 |
++| qualification_test (tmpfs) | 21/1/0 | 21/1/0 | 21/1/0 |
++| qualification_test compiled for ramfs | 20/1/1 | 20/1/1 | 20/1/1 |
++| upstream openat2_test | 4/0/0 | 4/0/0 | 4/0/0 |
++| upstream resolve_test | 5/0/0 | 5/0/0 | 5/0/0 |
++| upstream rename_attack_test | 2/0/0 | 2/0/0 | 2/0/0 |
++| upstream emptypath_test | 2/0/0 | 2/0/0 | 2/0/0 |
++| upstream Landlock base_test | 18/0/0 | 18/0/0 | 18/0/0 |
++| upstream Landlock fs_test | 439/0/13 | 439/0/13 | 439/0/13 |
++| **Userspace total per configuration** | **524/2/14** | **524/2/14** | **524/2/14** |
++
++32-bit static userspace on the regular IA32-enabled x86_64 image:
++original authority_test 13/0/0 and qualification_test 21/1/0, total **34/1/0**.
++This is compat-UAPI evidence, not a native i386/other-architecture kernel build.
++The ramfs skip is its missing ACL implementation. Upstream Landlock skips are
++3 overlayfs, 5 hostfs and 5 tracefs fixtures, explicitly not qualified.
++
++The final KASAN/lockdep log has no KASAN, WARNING or locking diagnostic.
++The final strict KCSAN kernel log contains **137 data-race reports**; do NOT
++label it sanitizer-clean just because most functional assertions pass.
++Report families concern get_cred/non_rcu initialization in init_file and dentry
++rename/lookup paths. A separate pristine HEAD build with the **same KCSAN
++config hash** ran a plain concurrent open/close reproducer and the upstream
++rename attack: both functional programs passed, but it produced **134 KCSAN
++reports**, including the same init_file and dentry report families and one
++additional tick/nohz report. This establishes that these families also occur
++without Authority; it does not prove every reported race harmless. No broad
++suppression or unrelated kernel change was applied. Gate D remains unqualified.
++
++Intermediate failed runs are retained: two namespace fixtures initially used
++old-namespace pinned mount FDs as mountpoints; upstream Landlock initially
++lacked writable per-suite cwd or helper binaries; a strict-KCSAN thread-entry
++test initially assumed pthread_join meant immediate thread-group removal.
++These harness defects were corrected and rerun, not hidden as kernel passes.
++The final bounded EBUSY retry does not weaken the live-multithread entry denial.
++
++### Environment, builds and reproduction
++
++Evidence/report: `/tmp/authority-v1/report.md`; authoritative final runtime
++logs are `complete-baseline/serial.log`, `complete-debug/serial.log`,
++`complete-kcsan/serial.log`, `complete-compat32/serial.log`.
++`results.json`, `complete-runner-results.txt` and `SHA256SUMS` give machine-readable
++counts, runner failures and artifact integrity. Earlier green runs did not
++include the clone negative assertion and are not final qualification results.
++
++Linux 7.3.0-rc5; Debian Trixie container GCC 14.2.0-19 / binutils 2.44 / make
++4.4.1; QEMU 10.0.13 KVM, q35, host CPU, 4 vCPUs, 4 GiB guest memory. No guest
++network, host disk or filesystem sharing. Full configs are `baseline/.config`,
++`debug/.config` and `kcsan/.config`; toolchain Dockerfiles/image IDs, build
++scripts, build logs and commands are retained. Source snapshots and task-only
++patches distinguish this task from the pre-existing prototype. `baseline/` is
++the incrementally rebuilt **final regular** build directory; its pre-fix image
++is preserved separately under the baseline run evidence.
++
++| Final artifact | SHA-256 |
++|---|---|
++| Regular bzImage | `5da09b15ced2784f49f19d53f57a422e7b8b9178b378aff8201893907bc18a24` |
++| Regular config | `4afa69e64a39b46046b3b89c5eb1b1424e561e1982a5fd597b52dc411a2b745e` |
++| KASAN/lockdep bzImage | `8813262eb686e0db6dbc055697ace333df4a245f622c293a1d0dcb92d3deed83` |
++| KASAN/lockdep config | `f87002ef2022fdcee452c8d8689f1b26776e3aca295665ca67e966c1b8ff56a6` |
++| KCSAN bzImage | `21390dca1ee7dad57825bdfdf7b76489631716400bf9929ede1944b481e72bca` |
++| KCSAN and pristine-control config | `207b291a8ffb420325a5f57c0ddecc4feb8a42d06c6040955eeb6ad32d4b5755` |
++| Pristine-control bzImage | `cba6d3956a5af5f3c1f8a271bad79d3d1909f3a2b0729d28517470deeb45d097` |
++
++Checked-in reproduction instructions are in
++`tools/testing/selftests/authority/README.md`, with regular/debug feature
++fragments and `run-qemu.sh`. The exact executed orchestration is
++`bash /tmp/authority-v1/run-qualification.sh`; each run also records its full
++QEMU invocation in `command.txt`. Full configurations, rather than feature
++fragments, define the executed builds. Initramfs timestamps/ownership are
++normalized; byte-identical kernel rebuilds still require matching toolchain
++and build metadata, and are not claimed. Native non-x86 builds/static analyzers
++were not executed. `git diff --check` and shell syntax validation pass.
++Checkpatch on the new C test has zero errors / three reviewed warnings (test
++flow-control macro, valid ENOSYS detection and a long diagnostic line); the runner has zero errors /
++four false-positive repeated filesystem-type/source-name warnings. These are
++not a clean-checkpatch claim for the entire pre-existing kernel worktree.
++
++### Release gates and concrete blockers
++
++| Gate | Decision |
++|---|---|
++| A Functional correctness | **FAIL/BLOCKED** — retained clone-LSM negative failure; missing complete historical suites |
++| B Security invariants | **UNQUALIFIED** — clone/independent-LSM derivation boundary unresolved; no universal traversal or revocation claim |
++| C Kernel integration | **PARTIAL** — bounded VFS/DAC/Landlock/FD/mount cases; required integrations below absent |
++| D Concurrency | **UNQUALIFIED** — bounded stress ran, KASAN/lockdep clean, strict KCSAN findings require disposition |
++| E Regression | **PARTIAL/BLOCKED** — upstream cases above executed, old capability/DAC sources and LTP unavailable |
++| F Reproducibility | **BOUNDED PASS** — checked-in harness/runner plus snapshots/configs/logs/hashes; temporary artifacts must be archived before loss |
++
++Seven explicitly BLOCKED qualification areas (these are **areas, not test-case
++counts**): (1) lost historical 21-case suite; (2) lost historical 47-case suite;
++(3) enforcing SELinux fixture/policy; (4) enforcing AppArmor configuration and
++fixture; (5) idmapped/user-namespace and callback-filesystem integration matrix;
++(6) Authority-on/off configuration comparison — no disable Kconfig exists,
++KUNIT=n is NOT Authority-off; (7) LTP source/guest installation. The pristine
++KCSAN build provides a limited Authority-absent control, not full equivalence
++qualification. USER_NS is disabled in the executed configs; no user-namespace
++runtime result is claimed. Allocation-failure injection, immutable/append-only,
++lease/delegation and broader topology/race/open-path coverage remain unqualified.
++
++**Final decision: NO-GO for Filesystem Authority v1 qualification.** Resolve the
++clone/LSM contract without weakening LSM denials or silently changing bearer/
++source-credential semantics; add the approved regression fix; disposition the
++KCSAN reports; restore/reconstruct the missing suites and required integration
++fixtures; then rerun the complete matrix. Focused passing tests do not establish
++production readiness or full process confinement.
++
++## 11. Targeted Landlock/FD audit follow-up (2026-10-16)
++
++**Targeted verdict: COMPATIBLE_WITH_DOCUMENTED_LIMITATIONS after the fix.**
++This supersedes the interpretation of the pre-Landlock READ-clone finding in
++§10, not its historical logs/counts or the whole-prototype NO-GO. Detailed
++analysis is [landlock-audit.md](landlock-audit.md); exact raw evidence, commands,
++configs, traces and hashes are in `/tmp/authority-landlock-audit/REPORT.md`.
++
++The old test interpreted source-derived READ as fresh pathname acquisition.
++Linux/Landlock intentionally preserve existing FD access across later
++confinement, dup/F_DUPFD, fork/exec and SCM_RIGHTS. Our documented clone is
++independent bearer derivation from a pinned source, retaining saved opener
++credentials, not a current-domain pathname reopen. The assertion that it must
++be denied solely because a fresh path open is denied was TEST_CONTRACT_ERROR.
++The corrected test checks readable READ-only derivation, denied WRITE and
++unchanged fresh-open denial. It also passes on the original unpatched image.
++
++A separate **IMPLEMENTATION_DEFECT** was reproduced: source Landlock optional
++TRUNCATE denial could be lost when a helper moved the object to a location
++where saved opener credentials grant TRUNCATE. A newer task Landlock layer
++still denied fresh opens, and source/dup ftruncate remained denied, but the
++old clone recomputed permissions and truncated the object. This is real
++stored-permission amplification, not expected non-retroactive FD behavior.
++The new regression closes the client's unrestricted fixture FD before the
++policy/open sequence; the rename helper holds directory handles, not a data FD.
++
++The focused fix adds LSM `security_file_clone(source, destination)` after
++ordinary open/post-open checks and before publication. Landlock rejects a
++clone with recomputed optional rights not present in the source's cached
++rights. No source state, opener credential, Authority bit, class or UAPI is
++rewritten. No opaque LSM blob or denial/audit metadata is copied. Conservative
++rejection preserves the source ceiling and uses existing cleanup paths.
++
++Actual targeted differential results (PASS/FAIL/SKIP): pristine+Landlock A
++**4/0/3**; modified B-unhandled **6/0/1**; Authority-enabled/Landlock-compiled-out C
++**5/0/2** (same C image unhandled **4/0/3**); original D with the new regression
++**6/1/0**; fixed D **7/0/0**. Fully Authority-disabled modified B is **BLOCKED**
++because no disable switch exists; unhandled task state is not feature-off.
++
++Complete fixed regular and KASAN/lockdep userspace regressions each report
++**533 PASS / 0 FAIL / 14 SKIP**. Components: original authority 13/0/0,
++qualification 22/0/0, targeted FD/Landlock 7/0/0, ramfs variant 21/0/1,
++upstream openat2 variants 4+5+2+2 pass, Landlock base 18/0/0 and fs 439/0/13.
++Core checks separately pass **10/10** on both images. Static compat32 authority
++suites report **42/0/0**. KASAN/lockdep showed no diagnostic. The !SECURITY stub
++was compile-tested, not boot-tested; C was actually booted with Landlock=n.
++Strict KCSAN and the other missing whole-prototype integrations were NOT rerun
++or upgraded to passing status in this targeted audit.
++
++The kprobe traces observe existing file_open/file_permission/file_post_open/
++file_truncate decisions plus the new guard; no decision is overridden. On the
++fixed moved-object case file_clone returns -EACCES after open/post-open and
++before FD publication. Fresh pathname and procfs opens remain denied after
++successful preexisting-FD derivation. Tests also retain foreign-opener
++AT_EMPTY_PATH ENOENT behavior after UID change. Device clones remain unsupported;
++regular managed ioctl fails closed while native device ioctl retains its LSM
++hook and open-time Landlock behavior.
++
++No general LSM-stacking or device-cloning compatibility is claimed. Stronger
++revocation/current-caller rebasing remains a separate policy, not this fix.
++The full Filesystem Authority v1 release decision remains **NO-GO** for the
++other historical regression, KCSAN and integration blockers in §10.
++
++## 12. Native/Authority LSM probe accounting correction (2026-10-17)
++
++The reported blocked edit to `/tmp/authority-v1-final/lsm_probe.c` was inspected
++before retrying anything. All earlier intended changes were actually present;
++the as-found source is retained in `probe-diagnostic/probe-as-found.c`. A
++corrective **test-only** edit and structured-argv compilation were permitted;
++no persistent restriction was observed. Production source was not modified
++during this correction. Previously prepared AppArmor/SELinux candidate fixes
++remain in place and are exercised below; this is not their full regression
++qualification or a restoration of the historical suites.
++
++`PR_CAPAUTH_GET_CONFINED` returns the boolean
++`authority_is_confined(current_cred())`: **0 means unconfined; 1 means confined;
++both mean the API is present**. Availability is recorded separately from
++process state. An already-confined fixture is rejected explicitly, not called
++API-absent. Query errors EPERM/EACCES/ENOSYS or unexpected return values fail;
++only -1/EINVAL denotes an unsupported/unrecognized query, which alone does not
++prove feature-off rather than filtering.
++
++The corrected nine-group probe gives native LSM assertions independent TAP
++results. API-dependent and engine-specific cases are skipped before callbacks
++run. No callback returns SKIP after executing assertions. Native I/O, positive
++bearer use, namespace denial and SELinux FD-use therefore remain visible when
++the custom API is absent.
++
++| Executed synthetic enforcing fixture | AppArmor PASS/FAIL/SKIP | SELinux PASS/FAIL/SKIP |
++|---|---:|---:|
++| Before the prior candidate LSM fixes, corrected probe | 6/1/2 | 8/1/0 |
++| Current fixed regular | 7/0/2 | 9/0/0 |
++| Current fixed KASAN/lockdep | 7/0/2 | 9/0/0 |
++| Pristine HEAD A, same regular config | 3/0/6 | 4/0/5 |
++
++The failures remain FAIL: AppArmor's clone previously recovered denied data
++I/O through mismatched cached grants/label; SELinux's custom fcntl operations
++previously bypassed native FD-use denial. The current probe checks the earlier
++candidate fixes without changing opener credentials or production behavior.
++The regular/pristine configs compare byte-identical. Counts are groups, not
++syscall assertions; rows are separate runs, not discoveries to sum. Skips on
++pristine A are unavailable custom API or SELinux-only cases under AppArmor,
++not passes. No kernel KASAN/lockdep/BUG/WARNING diagnostic was observed in the
++regular/KASAN replay. An optional missing AppArmor parser.conf userspace
++warning is retained; the actual asserted profile is enforcing.
++
++Classifier unit checks separately report 7/0/0, not kernel qualification
++cases. A real preconfined launcher returns GET_CONFINED=1; the probe correctly
++reports API present and rejects the invalid fixture with exit 1 and no SKIP.
++No suite cases execute in that startup-rejection control. Regular/KASAN case 9
++also observes real 0 -> 1 kernel state while retaining API_PRESENT. An
++additional pristine strict-KCSAN SELinux smoke run reports 4/0/5; it does not
++disposition the earlier concurrency findings.
++
++**Configuration B remains BLOCKED / not buildable as a selectable modified
++Authority-off configuration; it was not executed and has no credited passes.**
++There is no Authority-disable Kconfig/runtime switch. `kernel/Makefile` links
++`authority.o`, and `fs/Makefile` links `file_capability.o`, unconditionally.
++UNHANDLED/no task domain, KUNIT=n, Landlock=n and SECURITY=n are not
++Authority-off. Pristine A is an Authority-absent source control, not B. No
++production switch was added to manufacture that comparison.
++
++Exact sources, compiler argv, small guest initramfs, per-run QEMU argv,
++configs/image/log hashes and raw negative results are retained under
++`/tmp/authority-v1-final/probe-diagnostic/`; see `REPORT.md` and
++`replay/results.json`. These bounded synthetic policies do not qualify distro
++policies, general enforcing-Landlock stacking, all LSM cached state, namespaces
++or races. The §11 full 533-case result belongs to its earlier source image and
++was not silently promoted to a complete rerun of the newer candidate changes.
++Whole Filesystem Authority v1 remains **NO-GO**; the remaining gates and strict
++KCSAN/historical/integration work have not been waived.
++
++### Independent permitted LTP follow-up
++
++LTP 20250930 was obtained and selected tests actually executed, removing the
++source/guest-availability blocker for this subset only. On each of current
++fixed regular and pristine HEAD A, 24 selected executables exited 0. Their 23
++modern summaries report 331 passed / 0 failed / 0 broken / 0 skipped / 0 warnings;
++legacy `fcntl01` reports no success summary, so no additional assertion pass is
++invented. These are native/unhandled-task runs, not feature-off B or managed-FD
++Authority coverage. Executable groups and summary assertions are different
++counting units; neither represents all LTP or the lost historical suites.
++Individual exits, complete guest markers, exact QEMU argv, image/rootfs/log
++hashes and raw output are retained in `/tmp/authority-v1-final/ltp-runs/`,
++including `REPORT.md` and `replay-results.json`. No observed kernel BUG/WARNING
++diagnostic was found in these two runs. No release gate is waived by this
++bounded regression result.
++
++Disk-backed evidence retention now also exists at
++`/var/tmp/authority-evidence-archive/qualification-evidence.tar.gz`, containing
++all three qualification evidence trees. The external SHA256 check and gzip
++integrity check pass; archive-content verification matches all 369 files in
++the current continuation manifest, with none missing or mismatched. Initial
++permission/disk-space archival failures are recorded separately, not called
++successful backups. Only the disposable archive container and its incomplete
++new output were cleaned up; original evidence and unrelated containers were
++preserved. The sidecar ledger copy and integrity records accompany the archive.
++
++## 13. Filesystem v1 closure attempt — NO-GO (2026-10-17)
++
++This checkpoint preserves the earlier results but does not reuse them blindly.
++HEAD remains `e767a4ea70a3992c37ed604157d32f0dfbf9b1e3`, master, with the preserved
++uncommitted prototype. No production source changed in this closure task.
++All 32 changed/new production paths match the read-only staging source used by
++the executed current images. Relative to §11's 533-case snapshot, only the
++previously prepared three AppArmor/SELinux production files differ. New
++repository tests are `idmapped_test`, `callback_test`, `establishment_test`,
++`dac_fd_test`, and `handle_test`; their registration, configuration and README
++are updated. The original three tests are unchanged.
++
++### Exact current results and provenance
++
++| Executed configuration/suite | PASS/FAIL/SKIP | Distinction |
++|---|---:|---|
++| Current regular full original/upstream set | 536/0/11 | Core separately 10/0/0 |
++| Current KASAN/lockdep full set | 536/0/11 | Core 10/0/0; no observed kernel diagnostic |
++| Current earlier-shaped strict KCSAN | 533/0/14 | 141 unique races; runner fails despite functional passes |
++| Expanded verbose strict full + three new suites | 560/0/11 | 171 unique races; Core 10/0/0; runner fails |
++| Current compat32 original three suites | 42/0/0 | Existing unchanged-source static binaries executed anew |
++| Final idmap/callback/acquisition/DAC-FD, regular | 35/0/0 | Four distinct grouped suites: 9+4+11+11 |
++| Same four suites, KASAN and expanded strict, each | 35/0/0 | Later strict rerun clean; earlier accounting race retained |
++| Same four suites, pristine A | 8/0/27 | Native checks pass; unavailable API groups skip first |
++| Generic/XFS handle acquisition, regular and KASAN, each | 12/0/0 | Four native controls plus eight handled cases |
++| Handle acquisition, pristine A | 4/0/8 | No custom API passes invented |
++| Focused AppArmor regular/KASAN, each | 7/0/2 | Separate native assertions |
++| Focused SELinux regular/KASAN, each | 9/0/0 | Separate native FD-use assertions |
++| Focused pristine AppArmor / SELinux | 3/0/6; 4/0/5 | Same regular config as modified |
++| Enforcing major + Landlock FD groups, each major/config | 7/0/0 | Cached-TRUNCATE regression included |
++| Extended SELinux and namespace-capable AppArmor, regular/KASAN, each | 38/0/0 | Landlock 7 + idmap 9 + DAC/FD 11 + acquisition 11 |
++
++These are groups per execution, not individual syscall assertions or independent
++results to sum across configurations. Enabling overlayfs runs three previously
++skipped upstream Landlock cases, explaining **536/0/11 instead of 533/0/14**.
++The earlier-shaped strict config does not enable that coverage. Exact raw
++results, individual exits and diagnostic counts are in
++`/tmp/authority-v1-final/closure/all-runtime-results.json`.
++
++The LTP subset was rerun on current regular and pristine A: each has 24
++successful executable exits, 23 modern summaries totaling 331 PASS, zero
++FAIL/BROKEN/SKIP/WARNINGS, and a separately retained legacy `fcntl01` exit 0
++without an invented assertion count. This is neither all LTP nor managed-FD
++coverage. Failed fixture setup runs are preserved: the stacked launcher first
++used a relative argv[0]; the original AppArmor policy independently denied
++mount propagation and peer ptrace in extended namespace/import tests. A separate
++namespace/import fixture policy permits these prerequisites while preserving
++the tested file denials. Original probe policy is unchanged. Failed suites
++were not hidden by later outer-shell exit markers.
++
++### Idmap, callback, history and configuration findings
++
++Tmpfs idmap tests cover translated uid/gid and ACL behavior, native/UNHANDLED
++paths, mount-bound scope identity, create ownership, traversal denial,
++NOREPLACE/EXCHANGE, LINK/unlink, EXDEV, truncate, dup, clone/attenuation and
++established-FD lifetime. Re-idmapping a visible mount fails with EPERM before
++privilege drop; nested-userns root cannot manufacture scopes requiring
++initial-userns CAP_SYS_ADMIN. Selected enforcing major-LSM reruns pass too.
++This does not qualify every filesystem/mount/userns combination.
++
++The overlay tests confirm that positive semantic grants cannot replace custom
++permission callback denials; allowed controls succeed, and unsupported overlay
++FD-cap operations remain EOPNOTSUPP. XFS generic/ioctl handles and fanotify
++repeat fresh data ceilings; pidfd/fixed io_uring retain shared FD attenuation;
++procfs reopening repeats acquisition. Ordinary io_uring OPENAT still denies a
++missing handled scope even on a ring created before confinement. Generic
++metadata remains Linux policy, not a new class or retroactive FD revocation.
++The callback matrix explicitly lists broader NFS/FUSE/other-LSM gaps.
++
++The original 21/47 harnesses remain unrecovered from history, branches,
++worktrees and archived source snapshots. A 68-slot machine-readable inventory
++keeps individual original IDs/assertions unknown; a separate named-invariant
++matrix maps surviving claims to current replacements. No recovered numerical
++21/21 or 47/47 result is claimed. Current relevant invariants are tested rather
++than silently promoting historical PASS values.
++
++Configuration B is dispositioned **ACCEPTED_ARCHITECTURAL_LIMITATION** for the
++built-in v1 configuration: actual dependencies/obj-y linkage and architecture
++promise no disable selector. Its requested feature-off build still remains
++BLOCKED/not selectable/not executed, with no credited passes. Gate H covers
++supported always-built configurations plus native/UNHANDLED and matched
++pristine comparisons. A is not B. No switch was introduced to satisfy a matrix.
++
++### Remaining security/concurrency questions
++
++The old 137 unique KCSAN findings appear 274 times due to console/dmesg
++repetition. Current matched native controls produced 143 modified / 139
++pristine; expanded verbose full/pristine control produced 171/136. Detailed
++memory/width/stack/synchronization/source comparisons are retained. The
++constant-zero committed-cred `non_rcu` W/W is BENIGN_WITH_EVIDENCE. Dentry
++flags/parent/hash, idle-tick and accounting/task flags families are classified
++UPSTREAM_EXISTING with specific access/sequence/lock analysis, not dismissed
++merely because pristine also reports races. Authority may alter timing and
++instrumentation span; no new writes or removed locks on those words were found.
++No confirmed AUTHORITY_INTRODUCED family was found.
++
++Two rare boot families remain UNRESOLVED: `tmigr_cpu.cpuevt.ignore` and the
++8250 IER shadow startup/IRQ access. PCs and identical pristine machine code
++were established, but four short pristine boots did not reproduce them and
++complete synchronization disposition is absent. They were not suppressed or
++called harmless. Functional green results do not make strict KCSAN clean.
++
++An unscored io_uring credential-personality observation also needs an explicit
++scope decision. A personality registered before confinement retains the old
++credential snapshot: ordinary OPENAT and direct open deny, but explicitly
++selecting that old principal returns a readable new description while the
++objective task remains confined. This is distinct from fixed-file import or
++pinned-object derivation. It may represent retained delegated credential
++power; the existing fresh-open wording does not explicitly resolve the broad
++token. No revocation/current-caller rebasing, new class or silent contract
++change was added, and the observation is not counted as a security PASS.
++
++Focused W=1 succeeds; new C tests compile without -Wall diagnostics. GCC
++-fanalyzer was run and failed the Werror build on nine retained reports;
++source review identifies infeasible error-pointer/immutable-registry/clone
++paths. That is not advertised as an analyzer-clean build or allocation-failure
++injection proof. Sparse/clang were unavailable.
++
++### Independent release gates
++
++| Gate | Assessment | Boundary |
++|---|---|---|
++| A Functional correctness | PASS | Exact operations/configurations above |
++| B Security invariants | BLOCKED | Credential-token/fresh-acquisition contract unresolved |
++| C Kernel compatibility | PASS | Bounded native/UNHANDLED/pristine and LTP controls |
++| D LSM integration | PASS | Exact three-LSM/synthetic-policy/stacked selections, not every LSM |
++| E Memory/concurrency | BLOCKED | Two rare KCSAN dispositions remain incomplete |
++| F Regression coverage | ACCEPTED_LIMITATION | Named invariants covered; original per-case provenance unavailable |
++| G Reproducibility | PASS after integrity verification | Source, snapshots, commands, configs, binaries/logs and archive manifest |
++| H Configuration support | ACCEPTED_LIMITATION | Built-in x86_64 + compat userspace scope; no feature-off B claimed |
++
++**Final decision remains NO-GO.** Concrete remaining blockers are the two rare
++KCSAN dispositions and the credential-token scope/launch-contract decision.
++Broader untested configurations/failure injection remain stated limits, not
++passes. Detailed evidence and matrix/classification JSON are under
++`/tmp/authority-v1-final/closure/REPORT.md`; the previous persistent archive is
++preserved and this continuation has a separate source/evidence archive. No
++production readiness or complete process confinement is claimed.
++
++## 14. Temporal capability and io_uring adjudication (2026-10-17)
++
++**Finding classification: EXPECTED_VALID_DELEGATION.** This supersedes only
++§13's credential-personality contract ambiguity, not its recorded behavior,
++failed fixtures, concurrency findings or whole-v1 NO-GO.
++
++The governing invariant is **A_out ⊆ A_in**, evaluated at each transformation's
++creation point against all effective, legitimately supplied and delegable
++inputs, including provenance, applicable LSM restrictions and authorized grants.
++
++**A later reduction of the source's Authority does not retroactively invalidate a previously legitimate independent capability.**
++
++**A historical identity or credential snapshot is not automatically equivalent to a legitimately delegated Authority capability.**
++
++The selected explicit personality-registration contract meets the latter rule:
++`io_register_personality()` references the registrar's complete current
++credential, including immutable Authority/domain/scope state, and publishes it
++in the ring namespace. It does not merely copy UID/GID or use the ring creator's
++old privileges. Holding the credential holds Authority and pinned scopes alive.
++Source confinement/drop commits a replacement snapshot, not mutation of the
++registered one. A request resolves the ring-local ID under ring serialization,
++gets its own reference, passes LSM adoption checks, uses the selected subjective
++credential and reverts it afterward. The objective task remains confined.
++
++This is an independently valid execution-context capability despite immutable
++physical object sharing, not independent allocation of another Authority object.
++A later registration captures the new reduced state. Tests demonstrate RW,
++READ-only and zero **handled-data** scope snapshots with the same UID, plus
++outside-scope denial and retained UID 0 that cannot restore WRITE. The ring's
++mere saved opener credentials do not give default submissions old authority.
++Ring+ID sharing is explicit delegation to eligible ring holders, not a secret
++ID or a universal process sandbox. No `--no-delegation` functionality exists.
++
++FD clone and alias tests establish different contracts: clone snapshots
++source/request/mode and independent LSM ceilings into private file-cap state;
++dup/SCM_RIGHTS alias the same mutable restriction. An older independent RW clone
++retains RW after the source becomes READ, while later source clones cannot
++recover WRITE. A zero-right source clone remains zero; an earlier legitimate
++independent RW clone can itself delegate RW. A successful weaker intersection
++is not a requirement to fail the entire stronger clone request. Scoped fork
++contexts remain valid after parent COW reduction; exec preserves confinement.
++
++Source-rights reads bound overlapping FD derivation; completed reduction bounds
++later clones. Concurrent registration/confinement attempts obey the current
++multithread EBUSY guard and cause no partial confinement; entry occurs after
++the registering thread exits. A prepared IO_DRAIN request legitimately retains
++its own context after unregister, while subsequent ID lookup fails. Ring dup
++shares the registry; bounded teardown/reuse cannot resurrect old context.
++There is no global/object revocation API: that test is explicitly SKIP. Unlink,
++local attenuation, registry removal and global revocation are not conflated.
++
++### Final-source executed results
++
++| Focused execution | PASS/FAIL/SKIP | Notes |
++|---|---:|---|
++| Temporal regular | 15/0/1 | Core separately 10/0 |
++| Temporal KASAN/lockdep | 15/0/1 | Core 10/0; no observed diagnostic |
++| Temporal strict KCSAN | 15/0/1 | Core 10/0; no observed diagnostic in this workload |
++| Pristine A regular and strict, each | 2/0/14 | Native identity/registry controls; custom cases skip first |
++| Existing Authority + qualification + Landlock, regular/KASAN, each | 42/0/0 | 13+22+7; Core separately 10/0 |
++| Dedicated AppArmor interop, regular/KASAN/pristine, each | 3/0/0 | Current adoption veto + saved file denial + allowed control |
++| Dedicated SELinux interop, regular/KASAN/pristine, each | 3/0/0 | Enforcing policy verified; same three separate controls |
++
++Counts are groups per execution, not syscall assertions or sums across rows.
++The one custom skip is unimplemented global revocation. A captured Landlock
++READ-only restriction still rejects WRITE even when explicit Authority scopes
++had RW; this tests effective authority rather than bitmap-only comparison.
++Forced async issue preserves the issuer/selected context, not the old ring
++creator. 64 clone/restriction overlaps and 64 ring teardown cycles run per suite.
++CONFIG_DEBUG_KMEMLEAK is disabled: no general absence-of-leaks proof is claimed.
++
++The first AppArmor fixture produced a retained 2/1/0 result: the parser's default
++policy ABI did not advertise io_uring mediation, so its override-deny rule was
++not active. The corrected fixture explicitly selects the kernel-advertised
++io_uring policy feature using `--override-policy-abi`. No assertion, file deny,
++kernel check or LSM mode was weakened. The unchanged veto expectation then
++returns EACCES on modified and pristine. SELinux's separate uringblock_t allows
++FD access while denying override_creds, avoiding a false FD_USE/setup denial.
++
++No production code or UAPI changed. The existing 32 relevant production paths
++match the image source; new `temporal_test` and architecture/temporal/README/
++ledger updates are test/documentation only. Exact source, compiler commands,
++byte-matched current/pristine configs, image hashes, policy ABI, binaries,
++initial/final logs and manifests are in
++`/tmp/authority-v1-final/temporal-authority/REPORT.md`. See also
++[temporal semantics](temporal-semantics.md).
++
++**Focused io_uring verdict: qualified within ordinary and IOSQE_ASYNC tested
++scope; EXPECTED_VALID_DELEGATION, no confirmed amplification defect.** Broader
++SQPOLL/IOPOLL/policy-reload and future-class matrices are not promoted to passing.
++Global revocation, future delegation prohibitions, Rescue/sealing, restricted
++kernel modules and the permission CLI were not implemented. Native kernel
++module isolation remains separate long-term work.
++
++**Whole Filesystem Authority v1 remains NO-GO.** The personality semantic blocker
++is closed; the two previously unresolved timer-migration/serial-IRQ KCSAN
++families still block the overall concurrency gate. Clean focused runs do not
++erase those earlier full-workload findings or establish production readiness.
++
++## 15. Read-only final KCSAN attribution (2026-10-17)
++
++**Final bounded release decision: CONDITIONAL GO.** This supersedes §14's
++remaining attribution blockers only; previous NO-GO reports and raw findings
++remain historical evidence and are not overwritten. The temporal finding
++remains EXPECTED_VALID_DELEGATION; **A_out ⊆ A_in** and the established temporal,
++LSM and source-versus-alias contracts are unchanged.
++
++### Exact restriction and work actually performed
++
++Session record 5925 rejected the provider/model response to the preceding
++qualification request with a cybersecurity-risk error **before any tool call**.
++There was no rejected shell command, edit or QEMU invocation in that turn. The
++last successful step was validation of the temporal archive and 230 manifest
++files. `/tmp/authority-v1-final/kcsan-closure/restriction-record.json` and
++`RESTRICTION.md` retain the exact error and request identifier, without inventing
++a denied device operation. The blocked generation was not retried or bypassed.
++
++**New kernel executions: zero.** Work was limited to permitted existing-log,
++source, ELF instruction/type/layout and hash analysis plus documentation/evidence.
++A new intrusive rare-event/device-toggle campaign is BLOCKED/NOT EXECUTED under
++the current instruction; no tool-specific KVM prohibition was tested or asserted.
++No production source, driver, timer, policy, KCSAN setting or Authority behavior
++changed. All 32 production hashes still match the qualified image source.
++
++### Source-based attribution, not warning-string dismissal
++
++Both families are now classified **UPSTREAM_EXISTING_INDEPENDENT** for the
++observed pairs and current Authority delta. Fourteen relevant timer/idle/serial/
++tty source/type files match current tree, pristine HEAD and pristine staging.
++Five complete compiled instruction sections match between strict builds:
++`timer_migration.o`, `tick-sched.o`, `8250_port.o`, `8250_core.o`, `serial_core.o`.
++The reported structures, field offsets and PC/source mappings also match. This
++establishes the native access/control-flow/locking relationships independently
++of Authority, rather than assuming that an outside-source-directory report is
++harmless. **Neither whole kernel is declared sanitizer-clean.**
++
++* Timer, 1.246757 s: CPU1 timer-softirq READ_ONCE of the ignore byte under
++  group.lock versus CPU0 idle-exit plain store under tmc.lock/local IRQ exclusion.
++  The different locks do not serialize this pair. The field is a documented
++  hint, and actual remote expiration rechecks target state under tmc.lock;
++  group/per-CPU lifetime and atomic migrator/active sequencing are native and
++  unchanged. No Authority memory/state/callback/lifetime edge reaches this
++  private timer state. KUNIT=n, initial Authority=NULL and pre-/init context
++  exclude active Authority domain/cleanup; KCSAN/global timing can expose the
++  pre-existing pair. General benignness/compiler behavior is not asserted.
++* Serial, 7.266288 s: CPU0 PID1 `console_on_rootfs` startup assigns the software
++  `uart_8250_port.ier` shadow outside port.lock after IRQ setup; CPU3 IRQ reads
++  its THRI bit under port.lock. The tty mutex is not that IRQ lock. Q35 ttyS0
++  is the native 16550A at 0x3f8/IRQ4. This is not MMIO false sharing. The writer
++  ancestry does include modified VFS code, which can shift timing/layout; that
++  connection was examined, not denied. The console is S_IFCHR, unsupported for
++  managed regular-file capabilities, boot Authority=NULL and file-cap field
++  initialization is in separate file memory. No IER/IRQ/port-lock/layout/lifetime
++  change is made by Authority. The native startup/IRQ pair is reachable unchanged
++  in pristine. No driver safety claim or silencing fix follows.
++
++The new disposition concerns **origin and Authority independence**, not a proof
++that the underlying upstream races are universally benign. Source/type/code
++comparison supports that narrow attribution even without observing a rare
++pristine recurrence. Complete per-family reasoning is in `TIMER.md`/`SERIAL.md`.
++
++### Existing differential evidence and its limits
++
++110 existing serial-log files were inventoried and hashed; they are not 110
++independent matched trials. Only the two original logs contain these exact
++families, one unique event each after console/dmesg deduplication. **No existing
++pristine log contains either exact family.** No negative-run absence is used as
++proof and no new baseline reproduction is claimed.
++
++| Historical cohort | Last logged kernel time | All unique KCSAN | Target |
++|---|---:|---:|---|
++| Original strict native current | 74.420778 s | 143 | timer 1 |
++| Original strict native pristine | 73.155624 s | 139 | none |
++| Original strict full current | 84.223584 s | 141 | serial 1 |
++| Expanded verbose full current | 127.370977 s | 171 | none |
++| Expanded verbose native pristine | 86.497459 s | 136 | none |
++| Four pristine boot smokes | approximately 12.6–12.9 s each | 0 | none |
++
++These endpoints are not equal wall-duration measurements or race rates. The
++original native control pair has identical guest initramfs, workload, strict
++config and QEMU device/CPU/memory parameters. Other full/expanded workloads and
++windows differ. There is no existing device-disabled control. Raw logs, exact
++commands, hashes and comparison cohorts are copied/referenced in the new evidence.
++
++### Applicability, gates and release boundary
++
++Existing temporal archive and all 230 manifest files were reverified. Historical
++15/0/1 temporal, 42/0/0 Authority/filesystem/Landlock, 3/0/0 major-LSM and Core
++10/10 results remain historical, now checked for unchanged-source applicability;
++none is relabeled freshly run. Broader accepted FS/LSM/configuration, old 21/47
++harness identity, absent global revocation and static-analysis limits remain.
++
++| Gate | Assessment | Reason |
++|---|---|---|
++| A Functional | PASS | Unchanged-source retained supported-scope evidence |
++| B Security invariants | PASS | §14 temporal adjudication resolves prior scoped ambiguity |
++| C Kernel compatibility | PASS | Applicable native/UNHANDLED/pristine/LTP comparisons |
++| D LSM integration | PASS | Exact previously qualified configurations/policies only |
++| E Concurrency/memory safety | ACCEPTED_LIMITATION | Two observed pairs are independent pre-existing native behavior; no sanitizer-clean claim |
++| F Regression | ACCEPTED_LIMITATION | Named invariant matrix, not recovered individual 21/47 identity |
++| G Reproducibility | PASS after integrity verification | Source/config/code/layout comparison, raw evidence and archive |
++| H Configuration | ACCEPTED_LIMITATION | Supported always-built scope; missing feature-off B not passed |
++
++**CONDITIONAL GO**, not unrestricted GO or production readiness. Conditions are
++the established experimental v1 operations/configurations plus explicit
++acceptance of the independent native Linux timer/serial KCSAN dependency
++behavior. These findings are preserved, not suppressed or declared harmless;
++any new Authority state/synchronization/lifetime connection or functional
++symptom requires reassessment. A stricter sanitizer-clean-kernel release or
++fresh equal-duration/device-off reproduction requirement is not satisfied by
++this decision. The unexecuted intrusive campaign remains a visible evidence
++limit, not a passing test or a silently changed invariant.
++
++Detailed report: `/tmp/authority-v1-final/kcsan-closure/REPORT.md`.
++The continuation is archived separately alongside the preserved prior archives,
++with SHA-256 and archive-content integrity verification. No host deployment,
++reboot, commit, push/publication or security weakening occurred.
++
++## 16. Experimental v1 source/evidence freeze (2026-10-17)
++
++**CONDITIONAL GO — Experimental v1** is retained without rerunning expensive
++kernel suites or claiming new runtime PASS results. Baseline version:
++`filesystem-v1-experimental-20261017-r1`, base
++`e767a4ea70a3992c37ed604157d32f0dfbf9b1e3` plus the exact complete qualified patch
++series and formerly untracked required files. HEAD alone is not its identity.
++
++The release-reference materials are under
++`/var/tmp/authority-evidence-archive/filesystem-v1-baseline/`: full base source,
++complete production/build-test/documentation patches, full ready source snapshot,
++file/mode/symlink manifests, exact configs and evidence archive/report copies,
++reconstruction verification, version metadata and SHA-256 manifest. A disposable
++reconstruction, not a modification of the original worktree or Git history,
++verifies complete source content and all 32 qualified production hashes. New
++baseline/roadmap documentation is publication material added after testing;
++qualified production and test behavior did not change.
++
++The unrelated CocoIndex `.gitignore` addition is excluded from qualified source
++and preserved separately. Required untracked Core/header/FD/test/docs files are
++explicitly included. Generated installed headers are inventoried but regenerated
++from source for builds; compiled/generated qualification artifacts remain in the
++preserved evidence, not substituted for missing source. No new Kconfig disable
++switch or resource class was created. Reconstruction/integrity validation is
++not a new security or instrumentation test.
++
++[FILESYSTEM-V1-BASELINE.md](FILESYSTEM-V1-BASELINE.md) defines implemented versus
++qualified/experimental/planned/not-implemented/accepted-limit status, source and
++lifecycle identity, build/reproduction, supported scope, accepted gates and
++limits. **A_out ⊆ A_in** remains the permanent per-transformation requirement;
++legitimate delegation may preserve rights without attenuation. The temporal
++EXPECTED_VALID_DELEGATION finding, independent clone retention, shared-state
++attenuation, valid provenance and independent LSM restrictions are preserved.
++
++[NEXT-PHASE.md](NEXT-PHASE.md) recommends process contract/pidfd feasibility,
++IPC, externally shared memory, network, then audited devices. It is planning
++only. [FUTURE-REGRESSION.md](FUTURE-REGRESSION.md) makes source/provenance,
++non-amplification, temporal/alias, native/LSM and lifetime/concurrency checks
++mandatory for subsequent changes/classes using existing Linux test infrastructure.
++The next milestone is a reviewed minimum process-authority contract and test
++plan before production implementation or public ABI commitment.
++
++`authority/filesystem-v1` and
++`authority/filesystem-v1-experimental-20261017-r1` are proposed branch/tag names,
++**not created refs**. No commit/tag/push is authorized or performed. The local
++snapshot is content-addressed and sealed read-only after verification; this is
++not tamper-proof against a privileged storage owner and not an independently
++backed-up off-machine release. Local /tmp and /var/tmp alone are not long-term
++storage. New development must compare against this version, never update it
++in place.
++
++The KCSAN attribution conditions are unchanged: exact pristine recurrences
++were not observed; independent upstream classification is not harmlessness,
++a clean whole kernel or production readiness. The original historical 21/47
++case identities, limited config/FS/LSM matrix, feature-off B absence and other
++accepted limitations stay explicit. Future permission CLI/no-delegation,
++Rescue/sealing, TPA/service-manager/Audit integration and restricted components
++remain future work; ordinary private computation/allocation is not external
++Authority, and native-module isolation is not supplied by the current Core.
++

@@ -1,0 +1,15 @@
+tree efdbbe7f545991657d0204dd29a66c2332aaa964
+parent f8bc183c13ef36cee7f0c5736af269d61375e7ae
+author Eugen <eugen252009@gmail.com> 1792225368 +0200
+committer Eugen <eugen252009@gmail.com> 1792225368 +0200
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ iHUEABYKAB0WIQSvDGBPSGcm39TS7zfViIyBtkfWSAUCatMwWAAKCRDViIyBtkfW
+ SBYlAP0fPjwO8UQlrpUUl0n/euF3iFrDO49MuUUnGdG4pVunvwEAlTnSTvZ9Ft7J
+ HwPbscUPPGnQwgyFjINfvDZ9hBJZcgU=
+ =H2JR
+ -----END PGP SIGNATURE-----
+
+selftests: authority: cover filesystem lifecycle and acquisition
+
+Record the qualified core/filesystem, idmapped, callback, acquisition, DAC-FD and handle regression sources. Registration and runner arrive after all referenced test sources are present.

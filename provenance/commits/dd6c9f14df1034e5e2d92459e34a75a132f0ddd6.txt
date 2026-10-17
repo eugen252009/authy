@@ -1,0 +1,15 @@
+tree 7275bc49fdb704c88e8c2f90356eefa62968996c
+parent 99e2689d33e6f40c29fd14d204e7c6acf136acd5
+author Eugen <eugen252009@gmail.com> 1792225372 +0200
+committer Eugen <eugen252009@gmail.com> 1792225372 +0200
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ iHUEABYKAB0WIQSvDGBPSGcm39TS7zfViIyBtkfWSAUCatMwXAAKCRDViIyBtkfW
+ SDmSAQCWxvDsZwLr8/1w32xjQxrm4v6R6HzxKYHcGQEU9LOSmwEA4tYwDmWnOlOD
+ FR9opX3Nl1Y5xZbf5kNy4tR/yDSIFQw=
+ =C7ZT
+ -----END PGP SIGNATURE-----
+
+docs: authority: describe architecture and prototype provenance
+
+Document the Linux-based architecture, upstream provenance, historical prototype/design records and experimental boundaries. Preserve notices and source history; qualification-reference documents follow next.

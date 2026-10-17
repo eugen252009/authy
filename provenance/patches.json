@@ -1,0 +1,188 @@
+{
+  "linux_base": "e767a4ea70a3992c37ed604157d32f0dfbf9b1e3",
+  "original_tip": "c8b8dde1d872f7ced4169b7a1109f44577a31c2b",
+  "qualified_tree": "7fa351dedd010e448ba7b7a12e69789cc7556e93",
+  "signature_notice": "Patch files do not preserve Git commit-signature verification. Raw original signed records are retained as data; object hashing establishes original commit identity, not signer trust.",
+  "patches": [
+    {
+      "patch": "0001-authority-add-immutable-core-state-and-credential-li.patch",
+      "sha256": "64cc404d441f66ad1a43274c9c7c0675efdca977ec79297f92a8ed8749981801",
+      "original_commit": "c25016c12b05cb6458f96c7bbc09cc3d69d35ea7",
+      "subject": "authority: add immutable core state and credential lifecycle",
+      "parent": "e767a4ea70a3992c37ed604157d32f0dfbf9b1e3",
+      "author": "Eugen <eugen252009@gmail.com>",
+      "author_date": "2026-10-17T10:21:57+02:00",
+      "original_signed_record": "provenance/commits/c25016c12b05cb6458f96c7bbc09cc3d69d35ea7.txt",
+      "record_sha256": "124642fe093db0fcc0a73e79d6eda96e716678c121d80a244a3045a996549f99",
+      "changed_paths": [
+        "fs/exec.c",
+        "include/linux/authority.h",
+        "include/linux/cred.h",
+        "init/init_task.c",
+        "kernel/Makefile",
+        "kernel/authority.c",
+        "kernel/cred.c",
+        "security/keys/process_keys.c"
+      ]
+    },
+    {
+      "patch": "0002-fs-add-attenuating-and-independently-cloned-file-cap.patch",
+      "sha256": "dc5ddabc26eb84a7f9f2f59445eded51f9681eec444c102a5cf24e5217ce6e91",
+      "original_commit": "4099754d22849c1db34438b66c0296ed57581d0f",
+      "subject": "fs: add attenuating and independently cloned file capabilities",
+      "parent": "c25016c12b05cb6458f96c7bbc09cc3d69d35ea7",
+      "author": "Eugen <eugen252009@gmail.com>",
+      "author_date": "2026-10-17T10:22:16+02:00",
+      "original_signed_record": "provenance/commits/4099754d22849c1db34438b66c0296ed57581d0f.txt",
+      "record_sha256": "a3fee7021909662c5ec72bd11eb292aa14a5e7d5ffeb9735d965f3a58bc4dc38",
+      "changed_paths": [
+        "fs/Makefile",
+        "fs/fcntl.c",
+        "fs/file_capability.c",
+        "fs/file_table.c",
+        "fs/ioctl.c",
+        "fs/read_write.c",
+        "include/linux/file_capability.h",
+        "include/linux/fs.h",
+        "include/linux/lsm_hook_defs.h",
+        "include/linux/security.h",
+        "include/uapi/linux/fcntl.h",
+        "mm/mmap.c",
+        "security/apparmor/include/file.h",
+        "security/apparmor/lsm.c",
+        "security/landlock/fs.c",
+        "security/security.c",
+        "security/selinux/hooks.c"
+      ]
+    },
+    {
+      "patch": "0003-authority-enforce-scoped-filesystem-operations-throu.patch",
+      "sha256": "ed81d1d1390bb3c6a2a308b117be6800085d935e5e4c5c858a350a2e92a3bf04",
+      "original_commit": "f8bc183c13ef36cee7f0c5736af269d61375e7ae",
+      "subject": "authority: enforce scoped filesystem operations through VFS",
+      "parent": "4099754d22849c1db34438b66c0296ed57581d0f",
+      "author": "Eugen <eugen252009@gmail.com>",
+      "author_date": "2026-10-17T10:22:47+02:00",
+      "original_signed_record": "provenance/commits/f8bc183c13ef36cee7f0c5736af269d61375e7ae.txt",
+      "record_sha256": "671baa9ef3c393a2a40eb0224598b6366b58b89eb95e542d04cac2b52569e54d",
+      "changed_paths": [
+        "fs/namei.c",
+        "fs/notify/fanotify/fanotify_user.c",
+        "fs/open.c",
+        "fs/xfs/xfs_handle.c",
+        "include/linux/namei.h",
+        "include/uapi/linux/prctl.h",
+        "kernel/sys.c"
+      ]
+    },
+    {
+      "patch": "0004-selftests-authority-cover-filesystem-lifecycle-and-a.patch",
+      "sha256": "2a6f4882b0307347ad81a45605aa912ffd67ca4fae0bea395defdda90115e1e3",
+      "original_commit": "81dc7bbeb81556582c69406024dfad9691700346",
+      "subject": "selftests: authority: cover filesystem lifecycle and acquisition",
+      "parent": "f8bc183c13ef36cee7f0c5736af269d61375e7ae",
+      "author": "Eugen <eugen252009@gmail.com>",
+      "author_date": "2026-10-17T10:22:48+02:00",
+      "original_signed_record": "provenance/commits/81dc7bbeb81556582c69406024dfad9691700346.txt",
+      "record_sha256": "5d5cad55a5b81664f22dbb62fcf74ba0d5600087129e0063ff3ced456d365c07",
+      "changed_paths": [
+        "tools/testing/selftests/authority/authority_test.c",
+        "tools/testing/selftests/authority/callback_test.c",
+        "tools/testing/selftests/authority/dac_fd_test.c",
+        "tools/testing/selftests/authority/establishment_test.c",
+        "tools/testing/selftests/authority/handle_test.c",
+        "tools/testing/selftests/authority/idmapped_test.c",
+        "tools/testing/selftests/authority/qualification_test.c"
+      ]
+    },
+    {
+      "patch": "0005-selftests-authority-exercise-Landlock-descriptor-com.patch",
+      "sha256": "3a3d2b61c46315b03ff25181e5f3b92d3f878a322d539aa4cbf5b69548acb9c0",
+      "original_commit": "f30167893ba5a00e4bdcaf4ff4def6392adbed6b",
+      "subject": "selftests: authority: exercise Landlock descriptor composition",
+      "parent": "81dc7bbeb81556582c69406024dfad9691700346",
+      "author": "Eugen <eugen252009@gmail.com>",
+      "author_date": "2026-10-17T10:22:49+02:00",
+      "original_signed_record": "provenance/commits/f30167893ba5a00e4bdcaf4ff4def6392adbed6b.txt",
+      "record_sha256": "ad641e4faf08cc16784c48928b1a4c6c72189a19654855b2c0df7b08272aed52",
+      "changed_paths": [
+        "tools/testing/selftests/authority/landlock_fd_test.c"
+      ]
+    },
+    {
+      "patch": "0006-selftests-authority-qualify-temporal-delegation-and-.patch",
+      "sha256": "603c7a02aa12caf1084e53aa734562195f6e02cf21c9c39019789780162c7e54",
+      "original_commit": "935c956d484fe4c1af8e04f62ec6d3cbc8f80f3f",
+      "subject": "selftests: authority: qualify temporal delegation and snapshots",
+      "parent": "f30167893ba5a00e4bdcaf4ff4def6392adbed6b",
+      "author": "Eugen <eugen252009@gmail.com>",
+      "author_date": "2026-10-17T10:22:50+02:00",
+      "original_signed_record": "provenance/commits/935c956d484fe4c1af8e04f62ec6d3cbc8f80f3f.txt",
+      "record_sha256": "2b7418c91f89ac25744c57160ea79d39dc3381a68243ce32f878e1832ec8354b",
+      "changed_paths": [
+        "Documentation/authority/temporal-semantics.md",
+        "tools/testing/selftests/authority/temporal_test.c"
+      ]
+    },
+    {
+      "patch": "0007-selftests-authority-register-suites-and-isolated-QEM.patch",
+      "sha256": "94b88ea018246448e6522dd20bcfaa20acb71df88270a71c942575cab18d06f5",
+      "original_commit": "99e2689d33e6f40c29fd14d204e7c6acf136acd5",
+      "subject": "selftests: authority: register suites and isolated QEMU runner",
+      "parent": "935c956d484fe4c1af8e04f62ec6d3cbc8f80f3f",
+      "author": "Eugen <eugen252009@gmail.com>",
+      "author_date": "2026-10-17T10:22:51+02:00",
+      "original_signed_record": "provenance/commits/99e2689d33e6f40c29fd14d204e7c6acf136acd5.txt",
+      "record_sha256": "fa5f72a25599b911d0766113cb37baf777e347a7aa154b5eb663edee51c68fbf",
+      "changed_paths": [
+        "tools/testing/selftests/Makefile",
+        "tools/testing/selftests/authority/Makefile",
+        "tools/testing/selftests/authority/README.md",
+        "tools/testing/selftests/authority/debug.config",
+        "tools/testing/selftests/authority/qualification.config",
+        "tools/testing/selftests/authority/run-qemu.sh"
+      ]
+    },
+    {
+      "patch": "0008-docs-authority-describe-architecture-and-prototype-p.patch",
+      "sha256": "e054bb5fbeb0bbff65dffe90a747936e473f7ace3a324689b6d1d63e840418f1",
+      "original_commit": "dd6c9f14df1034e5e2d92459e34a75a132f0ddd6",
+      "subject": "docs: authority: describe architecture and prototype provenance",
+      "parent": "99e2689d33e6f40c29fd14d204e7c6acf136acd5",
+      "author": "Eugen <eugen252009@gmail.com>",
+      "author_date": "2026-10-17T10:22:52+02:00",
+      "original_signed_record": "provenance/commits/dd6c9f14df1034e5e2d92459e34a75a132f0ddd6.txt",
+      "record_sha256": "8ca61acce0fbe7ab9b092898be9f076423344e05b0a20f732a858619812d2349",
+      "changed_paths": [
+        "Documentation/authority-prototype/create-file-authority.rst",
+        "Documentation/authority-prototype/dac-architecture-audit.rst",
+        "Documentation/authority-prototype/historical-cve-review.rst",
+        "Documentation/authority-prototype/index.rst",
+        "Documentation/authority-prototype/reconstruction-request.md",
+        "Documentation/authority/architecture.md",
+        "Documentation/authority/design-history.md",
+        "Documentation/authority/index.rst",
+        "Documentation/index.rst"
+      ]
+    },
+    {
+      "patch": "0009-docs-authority-record-experimental-v1-qualification-.patch",
+      "sha256": "ad97f33717c91b9fc2cd81bbf457fe691d4b89c941f97f588b138d25289d78a8",
+      "original_commit": "c8b8dde1d872f7ced4169b7a1109f44577a31c2b",
+      "subject": "docs: authority: record experimental v1 qualification and roadmap",
+      "parent": "dd6c9f14df1034e5e2d92459e34a75a132f0ddd6",
+      "author": "Eugen <eugen252009@gmail.com>",
+      "author_date": "2026-10-17T10:22:53+02:00",
+      "original_signed_record": "provenance/commits/c8b8dde1d872f7ced4169b7a1109f44577a31c2b.txt",
+      "record_sha256": "1b79ea8efc5d5d9254321c817e30541721661cb888a55b3a646d74a870355caa",
+      "changed_paths": [
+        "Documentation/authority/FILESYSTEM-V1-BASELINE.md",
+        "Documentation/authority/FUTURE-REGRESSION.md",
+        "Documentation/authority/NEXT-PHASE.md",
+        "Documentation/authority/filesystem-v1-matrix.md",
+        "Documentation/authority/landlock-audit.md",
+        "Documentation/authority/qualification-status.md"
+      ]
+    }
+  ]
+}
