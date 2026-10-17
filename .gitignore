@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0-only
+/.work/
+/build/
+/output/
+/.cocoindex_code/
+.env
+.env.*
+__pycache__/
+*.pyc
+*.o
+*.ko
+*.qcow2
+*.img
+*.cpio
+*.log
+*.db
+*.sqlite
+*.sqlite3
+# Required patches and compressed source manifests are intentionally not ignored.
