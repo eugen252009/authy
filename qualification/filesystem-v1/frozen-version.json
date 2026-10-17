@@ -1,0 +1,53 @@
+{
+  "version": "filesystem-v1-experimental-20261017-r1",
+  "decision": "CONDITIONAL GO \u2014 Experimental v1",
+  "base_git_commit": "e767a4ea70a3992c37ed604157d32f0dfbf9b1e3",
+  "qualification_production_manifest_sha256": "13139dcb2edfbb2bf355dfcdc73eeb12dcdcfb228d890462416b51973382ee44",
+  "complete_source_manifest_sha256": "0cdb148324ec115555aaaa404b7e56fe5dca8e0d5f227414cd8ac43431d71448",
+  "reconstruction_inputs": [
+    {
+      "path": "source/base-linux.tar.gz",
+      "sha256": "b4fb71bd22327a65f76804f7f436334b5502e214df3de27c8326f33001b428f0",
+      "bytes": 342925864
+    },
+    {
+      "path": "source/expected-source.json",
+      "sha256": "0cdb148324ec115555aaaa404b7e56fe5dca8e0d5f227414cd8ac43431d71448",
+      "bytes": 25108476
+    },
+    {
+      "path": "source/patches/series",
+      "sha256": "77ad36e44b5e5e18c7cdcbdd50ee512c493ffe3cc6df7693cab986d69f978ed8",
+      "bytes": 100
+    },
+    {
+      "path": "source/patches/0001-authority-production.patch",
+      "sha256": "ac9cb9fcf82826f3ca0a9a92733e81d40389b136e1e570cd1cb80290a43a5f7f",
+      "bytes": 116491
+    },
+    {
+      "path": "source/patches/0002-selftests-and-runners.patch",
+      "sha256": "bc29490dbd199f7e2e786f74c78aa6e44efc099c3af43be9cb9de4ac2c8a26ba",
+      "bytes": 128050
+    },
+    {
+      "path": "source/patches/0003-authority-documentation.patch",
+      "sha256": "b28f9224a9358d40def84a87cb2808c947b37a1689490673b3f9836aefa50eb9",
+      "bytes": 325816
+    }
+  ],
+  "proposed_branch": "authority/filesystem-v1",
+  "proposed_tag": "authority/filesystem-v1-experimental-20261017-r1",
+  "git_refs_created": false,
+  "production_changes_during_freeze": false,
+  "new_kernel_tests_during_freeze": false,
+  "qualified_code_vs_publication_docs": "production/tests match retained qualified code; baseline/roadmap/regression documentation was added after runtime qualification",
+  "excluded_unrelated": ".gitignore CocoIndex addition saved separately; original worktree unchanged by reconstruction",
+  "sealing": "Content-addressed plus read-only local package; not privileged-owner-proof or independently backed-up storage",
+  "complete_source_snapshot": {
+    "path": "source/qualified-source.tar.gz",
+    "sha256": "af0a5fb7b35c11bc0256759a5fa32c71403dc8b6ecefd87363ece80abb4f3f40",
+    "bytes": 342972919
+  },
+  "reconstructed_file_count": 96086
+}

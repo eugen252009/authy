@@ -1,0 +1,130 @@
+[
+  {
+    "path": "fs/Makefile",
+    "sha256": "4ab7b173f5e1542fe6481e9625767c1c37a1e710a0804076b8312efd3e94caa3"
+  },
+  {
+    "path": "fs/exec.c",
+    "sha256": "13b051b6390ee097c9ea5369a874debac8814e9d25c2e72b3d61b06378e619f0"
+  },
+  {
+    "path": "fs/fcntl.c",
+    "sha256": "41f03ec06e9ac10ae501b8fc7c7bb4c8b0329c31f676e52947cca8588b88c976"
+  },
+  {
+    "path": "fs/file_capability.c",
+    "sha256": "7fc3bc155c0a3ac8497ad0e72ff7e0876219e89a10abe5d3e2c107ff1221d99d"
+  },
+  {
+    "path": "fs/file_table.c",
+    "sha256": "5a235c94f1bd2d0a52180c9268aa8fa03a5a9ea58c9fee5546e4a5fd63a9ec7d"
+  },
+  {
+    "path": "fs/ioctl.c",
+    "sha256": "8727895f042a046412c9bd4ca507d7a0b6ee075b6383007f40ba239749099204"
+  },
+  {
+    "path": "fs/namei.c",
+    "sha256": "30640d9ae2da77045baf5fcdfcf140c27d4f6abbf95198c1ead52350a2ecf65f"
+  },
+  {
+    "path": "fs/notify/fanotify/fanotify_user.c",
+    "sha256": "9fabd60f995b207b404d0f1173868d3ee2fe3381c408ebc6135e3202dfacecdd"
+  },
+  {
+    "path": "fs/open.c",
+    "sha256": "415dbc76080da43ad1befcf200d73c647253c18ef2ff85e6cddae0e88d9c37db"
+  },
+  {
+    "path": "fs/read_write.c",
+    "sha256": "f06c8df7574e9dd3caaa03725c0bc45b7b8ee0730afba6636d55be1bb7d4314c"
+  },
+  {
+    "path": "fs/xfs/xfs_handle.c",
+    "sha256": "cf6d10527b37512022a001b60eaa84056e7688c427b0e09ac835bd23c5fbcb4a"
+  },
+  {
+    "path": "include/linux/authority.h",
+    "sha256": "329710373c00504513ae79ed398d8dec8e083d1acc5fda4b0abd0c73d18987cd"
+  },
+  {
+    "path": "include/linux/cred.h",
+    "sha256": "b8015ed8d545f3abee60cfb06720af7a675a9effc1d50f24cefe220427065d60"
+  },
+  {
+    "path": "include/linux/file_capability.h",
+    "sha256": "02a8419949222b9c865cacdff9dabb72e884c545723fa52a29cc58dc447d39dd"
+  },
+  {
+    "path": "include/linux/fs.h",
+    "sha256": "41581f62fc09adbccb10fca987c7437a7053ec178f782d64c2065d45d65d7695"
+  },
+  {
+    "path": "include/linux/lsm_hook_defs.h",
+    "sha256": "d1f2b6c6c624990c75f19373f72b568a5580e867d01b8fbed598faab0b427146"
+  },
+  {
+    "path": "include/linux/namei.h",
+    "sha256": "1e06564af9465dd0da32442d8abda203f0da4ebf5b99b631280c46d6f51dbd91"
+  },
+  {
+    "path": "include/linux/security.h",
+    "sha256": "0c7a10c27b7dda15adfbf85eda2984cfdb4cd6acdd9efd1840f94294d9eda54b"
+  },
+  {
+    "path": "include/uapi/linux/fcntl.h",
+    "sha256": "926e05a31c2e1ad4cf7c52b2a7e3c0339ba21526dbe59932623fa67952b0ff26"
+  },
+  {
+    "path": "include/uapi/linux/prctl.h",
+    "sha256": "5f36bf2ae87c60e3bbf8f17f559a89a5e683f0b9080f4d9dc997165eb17f4bed"
+  },
+  {
+    "path": "init/init_task.c",
+    "sha256": "4778c8cd17218fa5928408001dc345a2a4787c7fe4da3f3b699bac6456718d21"
+  },
+  {
+    "path": "kernel/Makefile",
+    "sha256": "3335af01bb03a5638a8b457f279fe48310515e5bbd32a94a32584c67533e4766"
+  },
+  {
+    "path": "kernel/authority.c",
+    "sha256": "b563caa53e22cf2396d5a0bba5a0675f19b4bdff1596ae188b40e5b5884e970b"
+  },
+  {
+    "path": "kernel/cred.c",
+    "sha256": "f17223244bafdbbb7e933ae06c7222f32cd0b2dcecf3a5eed928e7cc7c62f145"
+  },
+  {
+    "path": "kernel/sys.c",
+    "sha256": "8930b460d046b8d271a1b68c49ccd2521d209370340fc13f4b593b2183c27d97"
+  },
+  {
+    "path": "mm/mmap.c",
+    "sha256": "fb39d359ed334bff6026e5167e934def8bf6ea5abd98add403a91749f2e7aaab"
+  },
+  {
+    "path": "security/apparmor/include/file.h",
+    "sha256": "358535fab494e9564ebc30b91290798bec1deb536d8c9db0ea0431ef16aa7335"
+  },
+  {
+    "path": "security/apparmor/lsm.c",
+    "sha256": "773b4307021c638c79275441069e0bb3afab0bbeae3c3b0d95a1a8735742ec34"
+  },
+  {
+    "path": "security/keys/process_keys.c",
+    "sha256": "b568cf0703aa7035459e256e2352a3f410790762ebaf2d030f17c484cc5ec634"
+  },
+  {
+    "path": "security/landlock/fs.c",
+    "sha256": "0caa5441ee1cca34b394262738ac258f7856b3a1b0d04d3e8a5535655f7695ad"
+  },
+  {
+    "path": "security/security.c",
+    "sha256": "b78806d195b745e349368adbd5cfd79f7f2484d92a42d81a935437ecaf4bb498"
+  },
+  {
+    "path": "security/selinux/hooks.c",
+    "sha256": "da374fc175f2df3161e09be6eb606dd8dd3863a4076f9b20455ec0fe66ea513c"
+  }
+]

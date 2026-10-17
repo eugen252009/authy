@@ -1,0 +1,26 @@
+[
+  {
+    "path": "evidence/archives/qualification-evidence.tar.gz",
+    "sha256": "c462705435b20e21e3fd2f8bd5e1f26cc16d30cbdc14b66a5acaac7a20751204",
+    "bytes": 7469236580,
+    "integrity": "SHA256_AND_GZIP_VERIFIED"
+  },
+  {
+    "path": "evidence/archives/closure-evidence.tar.gz",
+    "sha256": "a5fb49498f3aa923ab9c8e11bc80b3cd38f66ebb4e96d8455549729ad741a8ca",
+    "bytes": 2819082283,
+    "integrity": "SHA256_AND_GZIP_VERIFIED"
+  },
+  {
+    "path": "evidence/archives/temporal-authority.tar.gz",
+    "sha256": "6bf27f647fc8d0827473ed850f604e7eb3f358a32f24e35fbde23f3a7a77c80e",
+    "bytes": 696312436,
+    "integrity": "SHA256_AND_GZIP_VERIFIED"
+  },
+  {
+    "path": "evidence/archives/kcsan-closure.tar.gz",
+    "sha256": "022cf1e2fcd51aac3951e0f5f7e2820185ba6d0d5739c4a4c56a1fd2180c4650",
+    "bytes": 1022658,
+    "integrity": "SHA256_AND_GZIP_VERIFIED"
+  }
+]

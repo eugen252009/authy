@@ -1,0 +1,30 @@
+{
+  "baseline": "filesystem-v1-experimental-20261017-r1",
+  "qualification": "CONDITIONAL GO \u2014 Experimental v1",
+  "linux_url": "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+  "linux_commit": "e767a4ea70a3992c37ed604157d32f0dfbf9b1e3",
+  "original_authority_tip": "c8b8dde1d872f7ced4169b7a1109f44577a31c2b",
+  "qualified_git_tree": "7fa351dedd010e448ba7b7a12e69789cc7556e93",
+  "source_archive_sha256": "af0a5fb7b35c11bc0256759a5fa32c71403dc8b6ecefd87363ece80abb4f3f40",
+  "frozen_package_manifest_sha256": "d370f2fdc7aac28ccf50b249dd14f503ed633bef46dc3f3ce7d749800a06584e",
+  "source_manifest": "expected-source.json.gz",
+  "source_manifest_uncompressed_sha256": "0cdb148324ec115555aaaa404b7e56fe5dca8e0d5f227414cd8ac43431d71448",
+  "source_entries": 96086,
+  "production_paths": 32,
+  "input_sha256": {
+    "configs/kasan.config": "72a93a44905d0fe0c38334644937c571a0a515dd3b7f0d6455e9a5cc61e78589",
+    "configs/original-strict.config": "526783ccd86a7dceae7c3b72215be9552c79dd8a2399dbbc4f31eba87f6c9580",
+    "configs/pristine-strict.config": "e325606ed29a8a9385b7a407b0d26069946318616f12190f9343586d58241311",
+    "configs/pristine.config": "eb227c7565a4c31ff89ad7b43f42895d7019257080039fb22d16ce3ee70233ce",
+    "configs/regular.config": "eb227c7565a4c31ff89ad7b43f42895d7019257080039fb22d16ce3ee70233ce",
+    "configs/strict.config": "e325606ed29a8a9385b7a407b0d26069946318616f12190f9343586d58241311",
+    "expected-source.json.gz": "92fcd2265bebe6520e2beca845a362d839470a195254c6ce1d3159302182cc97",
+    "external-artifacts.json": "03f994d40bffe9411424e03767295808703d4114c5affbaa1c5eabf9cbd2c5a8",
+    "frozen-version.json": "c3afef77c3f3ea9dbf78478279238612fe010a9ef11ce14456bd2ce00daf19a9",
+    "production.json": "6d0bb3ea55e71cbc555cef599a53a15b87e102a568cf49207f9bdc07cb2241c8",
+    "reports/closure.md": "ab137baeab4ac64c54835267c08b271ce64631de124a7854d3dddc1702ae7636",
+    "reports/kcsan-closure.md": "87c8fdd4b435196975eb2b7f956619637960fc73749baf216755a6481492d3f4",
+    "reports/temporal-authority.md": "dbb7daa7afc6336e25576da84a6f22bf94e050d71d64b24f1b0439a0bd136641"
+  },
+  "external_evidence_availability": "Not published in this repository. Historical local paths are provenance only; no public archive URL or off-machine backup is claimed."
+}
