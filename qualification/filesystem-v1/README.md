@@ -15,6 +15,8 @@ verified; historical functional results have not thereby been rerun.
   SHA-256 is `0cdb148324ec115555aaaa404b7e56fe5dca8e0d5f227414cd8ac43431d71448`.
   It is metadata, not a kernel source archive or replacement Linux dependency.
 * [production.json](production.json): the 32 qualified production hashes.
+* [standalone-checks.json](standalone-checks.json): fresh-clone source equivalence
+  and compile-only results for the independent repository tooling.
 * `configs/`: full retained regular, KASAN, strict and control configurations.
   Fragments alone do not identify qualified images. `pristine` means a different
   **source tree**, not a feature-off switch in the patched tree.

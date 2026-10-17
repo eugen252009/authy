@@ -6,7 +6,8 @@ Linux is an external, exactly pinned dependency; this repository contains Authy
 patches, provenance, reconstruction tools and qualification metadata—not Linux's
 source history.
 
-**Qualification: CONDITIONAL GO — Experimental Filesystem v1**  
+**Qualification: CONDITIONAL GO — Experimental Filesystem v1**
+
 Baseline: `filesystem-v1-experimental-20261017-r1`.
 
 This is **not production-ready**, not a sanitizer-clean-kernel claim, not a

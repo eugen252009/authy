@@ -1,0 +1,70 @@
+{
+  "method": "Fresh independent Authy clone, canonical upstream submodule initialization, all nine patches, frozen full-source verification, compile-only selftests",
+  "tested_authy_commit": "982922a7fed4afd6b3f585771944704a29157f14",
+  "linux_commit": "e767a4ea70a3992c37ed604157d32f0dfbf9b1e3",
+  "dependency_url": "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+  "source_equivalence": {
+    "baseline": "filesystem-v1-experimental-20261017-r1",
+    "expected_files_and_symlinks": 96086,
+    "missing": [],
+    "extra": [],
+    "extra_directories": [],
+    "mismatches": [],
+    "production_paths": 32,
+    "production_mismatches": [],
+    "selftest_build_runner_readme_paths": 14,
+    "qualification_documentation_paths": 15,
+    "verified": true
+  },
+  "fresh_selftest_compilation": {
+    "commands": [
+      [
+        "make",
+        "-C",
+        "/tmp/authy-standalone-audit/fresh-clone/.work/source",
+        "O=/tmp/authy-standalone-audit/fresh-clone/.work/test-build/kernel",
+        "headers_install",
+        "INSTALL_HDR_PATH=/tmp/authy-standalone-audit/fresh-clone/.work/test-build/headers"
+      ],
+      [
+        "make",
+        "-C",
+        "/tmp/authy-standalone-audit/fresh-clone/.work/source/tools/testing/selftests/authority",
+        "OUTPUT=/tmp/authy-standalone-audit/fresh-clone/.work/test-build/tests/",
+        "-j4",
+        "CFLAGS=-static -Wall -O2 -isystem /tmp/authy-standalone-audit/fresh-clone/.work/test-build/headers/include"
+      ]
+    ],
+    "selftest_binaries_sha256": {
+      "authority_test": "d82053a57c525dd1780bebe33cc707566c6cb3590c12849bdeeda1e707638977",
+      "callback_test": "f097ed13320c82ecc181bf39321bd0c667ad15c983f430c26494a8dc293da2dc",
+      "dac_fd_test": "8483167253590b5fb1d89b54e2da13dc91de0e468980b28a3e1e981355f713a0",
+      "establishment_test": "faa1b9ec35462c3858fe8b5603022e31346f07911da20e9df365fd7a513a77a9",
+      "handle_test": "e806afe4b95ba8801fa8cb4122a23adbd39658640fc9e94b90a88e9bc9c9dca8",
+      "idmapped_test": "c39ca184b790bacb0ed866e443b0590323d39d1d1ce848f721ff910e92002a57",
+      "landlock_fd_test": "493ebcb30477a82704051df5a9010c68e154aa1027b4dd2d145924e48211168d",
+      "qualification_test": "65de0cad3d7af2ac1ff2555ba184b6a16fb37fed014c048865e23074e4e64047",
+      "temporal_test": "8af86d56db31ce97a5bada0154c27e1bebb58b15e15974507bb6a4bfdcd08457"
+    },
+    "kernel_built": false,
+    "tests_executed": false,
+    "binary_reproducibility_claim": false
+  },
+  "tooling_unit_tests": {
+    "cases": 10,
+    "failures": 0,
+    "scope": "reconstruction safeguards, not kernel assertions"
+  },
+  "kernel_build_executed": false,
+  "test_binaries_executed": false,
+  "external_archives_required_for_reconstruction": false,
+  "original_worktree_required_for_reconstruction": false,
+  "binary_reproducibility_claim": false,
+  "tested_scripts_sha256": {
+    "authy.py": "ac43b18688e63f244b588e4321f529f550ab587dac08fccae3970f4ca4d3efd1",
+    "build.sh": "53eaf9db1a80214754841ef3a13d8acde8e78b15839c2d767afc69098dca8827",
+    "prepare.sh": "d0ab0f58cfb38a71cc7eab0bd6de8a7cfbc11cecdc652a9bc37329bbcd8747ad",
+    "test_tooling.py": "a52f9905dcd3cfa7cd162dbe248c1ed37919d477ee7fe3cfbd3c139a641be26e",
+    "verify.sh": "5e08d7cc45b4020c7aff2f43018b32a70a378665aa5cc1b3914520a2df7cca7c"
+  }
+}
